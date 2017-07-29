@@ -269,3 +269,7 @@ func (l *LocalClient) GetWatcher(key string, timeSleep time.Duration) <-chan []p
 func (l *LocalClient) Status() (string, error) {
 	return "Local: OK", nil
 }
+
+// StartWatch starts watching for changes in a prefix
+func (l *LocalClient) StartWatch(w *Watcher) {
+}
