@@ -53,6 +53,9 @@
 #include "lib/encap.h"
 #include "lib/conntrack.h"
 
+/* cb[] mapping for CILIUM_CALL_IPV4 */
+#define CB_REVNAT 0
+
 struct bpf_elf_map __section_maps CT_MAP6 = {
 #ifdef HAVE_LRU_MAP_TYPE
 	.type		= BPF_MAP_TYPE_LRU_HASH,
@@ -432,6 +435,8 @@ static inline int __inline__ svc_lookup4(struct __sk_buff *skb, struct iphdr *ip
 
 	svc_hit = true;
 
+	cilium_trace(skb, DBG_GENERIC, svc->rev_nat_index, 0);
+	skb->cb[CB_REVNAT] = svc->rev_nat_index;
 	ct_state_new.rev_nat_index = svc->rev_nat_index;
 	tuple.daddr = svc->target;
 
@@ -508,7 +513,7 @@ static inline int handle_lb_ip4(struct __sk_buff *skb)
 }
 #endif /* LB_IP4 */
 
-static inline int handle_ipv4(struct __sk_buff *skb)
+static inline int handle_ipv4(struct __sk_buff *skb, __u32 revnat)
 {
 	void *data = (void *) (long) skb->data;
 	void *data_end = (void *) (long) skb->data_end;
@@ -569,6 +574,9 @@ static inline int handle_ipv4(struct __sk_buff *skb)
 			key.ip4 = ip4->daddr & IPV4_MASK;
 			key.family = ENDPOINT_KEY_IPV4;
 
+			if (revnat)
+				secctx = (revnat & MD_ID_MASK) | MD_F_REVNAT;
+
 			cilium_trace(skb, DBG_NETDEV_ENCAP4, key.ip4, secctx);
 			return encap_and_redirect(skb, &key, secctx);
 #endif
@@ -591,7 +599,9 @@ __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_LB_IP4) int tail_handle_lb_ip4(stru
 
 __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4) int tail_handle_ipv4(struct __sk_buff *skb)
 {
-	int ret = handle_ipv4(skb);
+	__u32 revnat = skb->cb[CB_REVNAT];
+	cilium_trace(skb, DBG_GENERIC, revnat, 0);
+	int ret = handle_ipv4(skb, revnat);
 
 	if (IS_ERR(ret))
 		return send_drop_notify_error(skb, ret, TC_ACT_SHOT);

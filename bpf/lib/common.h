@@ -52,6 +52,10 @@
 #define CILIUM_CALL_LB_IP6			11
 #define CILIUM_CALL_SIZE			12
 
+/* metadata field (20 bits) */
+#define MD_ID_MASK 0xFFFF
+#define MD_F_REVNAT (1 << 15)
+
 typedef __u64 mac_t;
 
 union v6addr {

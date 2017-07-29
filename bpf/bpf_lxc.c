@@ -892,6 +892,16 @@ static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u
 
 	}
 
+	/* The source metadata can be either an identity or a reverse nat id
+	 * depending on the MD_F_REVNAT bit. The identity is used cluster
+	 * internally, the reverse nat id is used for external traffic and is
+	 * used to perform reverse NAT on the receiving node.
+	 */
+	if (src_label & MD_F_REVNAT) {
+		ct_state_new.rev_nat_index = src_label & MD_ID_MASK;
+		src_label = WORLD_ID;
+	}
+
 	/* Policy lookup is done on every packet to account for packets that
 	 * passed through the allowed consumer. */
 	verdict = policy_can_access(&POLICY_MAP, skb, src_label, sizeof(tuple.saddr), &tuple.saddr);
