@@ -570,7 +570,6 @@ static inline int __inline__ ct_create4(void *map, struct ipv4_ct_tuple *tuple,
 	if (dir == CT_INGRESS) {
 		if (tuple->nexthdr == IPPROTO_UDP ||
 		    tuple->nexthdr == IPPROTO_TCP) {
-			cilium_trace(skb, DBG_GENERIC, ct_state->orig_dport, tuple->nexthdr);
 			/* Resolve L4 policy. This may fail due to policy reasons. May
 			 * optonally return a proxy port number to redirect all traffic to.
 			 *

@@ -22,6 +22,8 @@
  * back into the same endpoint */
 #define DISABLE_LOOPBACK_LB
 
+#define QUIET_LB
+
 #ifndef CONNTRACK
 #define CONNTRACK
 #endif
@@ -423,7 +425,7 @@ static inline int __inline__ svc_lookup4(struct __sk_buff *skb, struct iphdr *ip
 	ct_state_new.orig_dport = key.dport;
 
 	if (!(svc = lb4_lookup_service(skb, &key)))
-		goto do_ct;
+		return TC_ACT_OK;
 
 	cilium_trace_capture(skb, DBG_CAPTURE_FROM_LB, skb->ingress_ifindex);
 
@@ -441,18 +443,13 @@ static inline int __inline__ svc_lookup4(struct __sk_buff *skb, struct iphdr *ip
 
 	svc_hit = true;
 
-	cilium_trace(skb, DBG_GENERIC, svc->rev_nat_index, 0);
+	cilium_trace(skb, DBG_GENERIC, 10, svc->rev_nat_index);
 	skb->cb[CB_REVNAT] = svc->rev_nat_index;
 	ct_state_new.rev_nat_index = svc->rev_nat_index;
 	tuple.daddr = svc->target;
 
 	verdict = TC_ACT_REDIRECT;
 
-do_ct:
-	/* Pass all outgoing packets through conntrack. This will create an
-	 * entry to allow reverse packets and return set cb[CB_POLICY] to
-	 * POLICY_SKIP if the packet is a reply packet to an existing
-	 * incoming connection. */
 	ret = ct_lookup4(&CT_MAP4, &tuple, skb, l4_off, CT_INGRESS, &ct_state);
 	if (ret < 0)
 		return TC_ACT_OK;
@@ -511,8 +508,12 @@ static inline int handle_lb_ip4(struct __sk_buff *skb)
 	ret = svc_lookup4(skb, ip4, l4_off, secctx);
 	if (IS_ERR(ret))
 		return ret;
-	else if (ret == TC_ACT_REDIRECT)
-		return ret;
+	else if (ret == TC_ACT_REDIRECT) {
+		ret = handle_redirect(skb, ret);
+		if (ret != TC_ACT_OK) {
+			return ret;
+		}
+	}
 
 	ep_tail_call(skb, CILIUM_CALL_IPV4);
 	return send_drop_notify_error(skb, DROP_MISSED_TAIL_CALL, TC_ACT_OK);
@@ -608,7 +609,7 @@ __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_LB_IP4) int tail_handle_lb_ip4(stru
 __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV4) int tail_handle_ipv4(struct __sk_buff *skb)
 {
 	__u32 revnat = skb->cb[CB_REVNAT];
-	cilium_trace(skb, DBG_GENERIC, revnat, 0);
+	cilium_trace(skb, DBG_GENERIC, 20, revnat);
 	int ret = handle_ipv4(skb, revnat);
 
 	if (IS_ERR(ret))
