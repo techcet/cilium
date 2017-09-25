@@ -26,6 +26,15 @@ desc_rate "Next, start Marathon, the container scheduler".
 
 run "./start_marathon.sh"
 
+desc_rate ""
+
+run "screen -S goodclient"
+desc_rate "This is the goodclient's log."
+
+
+run "screen -S badclient"
+desc_rate "This is the badclient's log."
+
 desc_rate "If you want to try out this demo yourself, you can do so by    
  following the steps at: http://www.cilium.io/try-mesos              
                                                                       
