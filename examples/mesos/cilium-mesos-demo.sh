@@ -17,7 +17,14 @@ cleanup
 
 desc_rate "Welcome to the Mesos Getting Started Guide demo."
 desc_rate "This demo shows a brief introduction to using Cilium with Mesos."
-desc_rate "
+desc_rate "The Mesos Master and Slave services as well as Cilium has already been set up."
+desc_rate "First, confirm that Cilium is up."
+
+run "cilium status"
+
+desc_rate "Next, start Marathon, the container scheduler".
+
+run "./start_marathon.sh"
 
 desc_rate "If you want to try out this demo yourself, you can do so by    
  following the steps at: http://www.cilium.io/try-mesos              
