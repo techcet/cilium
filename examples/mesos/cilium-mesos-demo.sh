@@ -25,25 +25,17 @@ run "./start_marathon.sh"
 desc_rate "Start the web-server application and test it."
 run "eval curl -i -H 'Content-Type: application/json' -d @web-server.json 127.0.0.1:8080/v2/apps"
 echo ""
+sleep 5
 ./generate_client_file.sh goodclient
-./generate_client_file.sh badclient
 desc_rate "Next, start the goodclient task, retrieving URLs from the web-server."
 run "eval curl -i -H 'Content-Type: application/json' -d @goodclient.json 127.0.0.1:8080/v2/apps"
 echo ""
-#desc_rate "Finally, start the badclient task, retrieving URLs from the web-server."
-#run "eval curl -i -H 'Content-Type: application/json' -d @badclient.json 127.0.0.1:8080/v2/apps"
-#echo ""
 desc_rate "Cilium represents these workloads as endpoints, as observed with the following output:"
 run "cilium endpoint list"
 desc_rate "Let's observe what these tasks are doing by looking at the logs."
-#run "screen -S goodclient"
 trap ' ' INT
 desc_rate "This is the goodclient's log."
 run "./tail_client.sh goodclient"
-# hit CTRL-c
-#run "screen -S badclient"
-#desc_rate "This is the badclient's log."
-#run "./tail_client.sh badclient"
 # hit CTRL-c
 desc_rate "With no policy enforced, both the goodclient and badclient can access /public and /private URLs from the web-server."
 desc_rate "Let's apply a Layer-7 policy that only allows the goodclient to access the /public URL."
