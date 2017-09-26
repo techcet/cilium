@@ -28,17 +28,23 @@ run "eval curl -i -H 'Content-Type: application/json' -d @goodclient.json 127.0.
 run "eval curl -i -H 'Content-Type: application/json' -d @badclient.json 127.0.0.1:8080/v2/apps"
 run "cilium endpoint list"
 
-#run "screen -AmdS goodclient"
-run "screen -S goodclient"
+#run "screen -S goodclient"
+trap ' ' INT
 desc_rate "This is the goodclient's log."
 run "./tail_client.sh goodclient"
-
-
-#run "screen -AmdS badclient"
-run "screen -S badclient"
+# hit CTRL-c
+#run "screen -S badclient"
 desc_rate "This is the badclient's log."
 run "./tail_client.sh badclient"
+# hit CTRL-c
+desc_rate "With no policy enforced, both the goodclient and badclient can access /public and /private URLs from the web-server."
 
+desc_rate "Let's apply a Layer-7 policy that only allows the goodclient to access the /public URL."
+run "cilium policy import l7-policy.json"
+
+desc_rate "This is the goodclient's log."
+run "./tail_client.sh goodclient"
+# hit CTRL-c
 
 desc_rate "If you want to try out this demo yourself, you can do so by    
  following the steps at: http://www.cilium.io/try-mesos              
@@ -47,5 +53,4 @@ desc_rate "If you want to try out this demo yourself, you can do so by
   - Visit: https://www.cilium.io/                                                                                             
   - Join us on slack: https://cilium.herokuapp.com/"                                                                         
 
-run "ls -l" 
-run "echo foo"
+trap "echo" EXIT
