@@ -31,13 +31,17 @@ run "curl -i -H 'Content-Type: application/json' -d @goodclient.json 127.0.0.1:8
 run "curl -i -H 'Content-Type: application/json' -d @badclient.json 127.0.0.1:8080/v2/apps"
 run "cilium endpoint list"
 
-
+#run "screen -AmdS goodclient"
 run "screen -S goodclient"
 desc_rate "This is the goodclient's log."
+run "./tail_client.sh goodclient"
 
 
+#run "screen -AmdS badclient"
 run "screen -S badclient"
 desc_rate "This is the badclient's log."
+run "./tail_client.sh badclient"
+
 
 desc_rate "If you want to try out this demo yourself, you can do so by    
  following the steps at: http://www.cilium.io/try-mesos              
