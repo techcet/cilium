@@ -41,11 +41,14 @@ desc_rate "With no policy enforced, both the goodclient and badclient can access
 
 desc_rate "Let's apply a Layer-7 policy that only allows the goodclient to access the /public URL."
 run "cilium policy import l7-policy.json"
-
-desc_rate "This is the goodclient's log."
+desc_rate "We can observe that the policy got enforced with the following output."
+run "cilium endpoint list"
+sleep 2
+desc_rate "Let's check the goodclient's log again."
+sleep 2
 run "./tail_client.sh goodclient"
 # hit CTRL-c
-
+desc_rate "There you have it! Cilium enforces L7 policy to protect the /private URL on the web-server."
 desc_rate "If you want to try out this demo yourself, you can do so by    
  following the steps at: http://www.cilium.io/try-mesos              
                                                                       
