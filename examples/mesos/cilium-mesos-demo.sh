@@ -26,7 +26,11 @@ desc_rate "Next, start Marathon, the container scheduler".
 
 run "./start_marathon.sh"
 
-desc_rate ""
+run "curl -i -H 'Content-Type: application/json' -d @web-server.json 127.0.0.1:8080/v2/apps"
+run "curl -i -H 'Content-Type: application/json' -d @goodclient.json 127.0.0.1:8080/v2/apps"
+run "curl -i -H 'Content-Type: application/json' -d @badclient.json 127.0.0.1:8080/v2/apps"
+run "cilium endpoint list"
+
 
 run "screen -S goodclient"
 desc_rate "This is the goodclient's log."
