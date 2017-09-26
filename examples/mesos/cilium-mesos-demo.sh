@@ -25,8 +25,8 @@ run "./start_marathon.sh"
 desc_rate "Start the web-server application and test it."
 run "eval curl -i -H 'Content-Type: application/json' -d @web-server.json 127.0.0.1:8080/v2/apps"
 echo ""
-run "export WEB_IP=`cilium endpoint list | grep web-server | awk '{print $6}'`"
-run "curl $WEB_IP:8181/api"
+./generate_client_file.sh goodclient
+./generate_client_file.sh badclient
 desc_rate "Next, start the goodclient task, retrieving URLs from the web-server."
 run "eval curl -i -H 'Content-Type: application/json' -d @goodclient.json 127.0.0.1:8080/v2/apps"
 echo ""
@@ -47,18 +47,19 @@ run "./tail_client.sh goodclient"
 # hit CTRL-c
 desc_rate "With no policy enforced, both the goodclient and badclient can access /public and /private URLs from the web-server."
 desc_rate "Let's apply a Layer-7 policy that only allows the goodclient to access the /public URL."
+desc_rate "Here's a closer look at the L7 policy that we will apply:"
+run "cat l7-policy.json"
+desc_rate "Notice we are only allowing traffic labeled \"goodclient\" to access the /public URL on web-server. Let's import the policy into Cilium".
 run "cilium policy import l7-policy.json"
 desc_rate "We can observe that the policy got enabled with the following output."
 run "cilium endpoint list"
-sleep 2
 desc_rate "Let's check the goodclient's log again."
-sleep 2
 run "./tail_client.sh goodclient"
 # hit CTRL-c
 desc_rate "There you have it! Cilium enforces L7 policy to protect the /private URL on the web-server."
 desc_rate "If you want to try out this demo yourself, you can do so by    
- following the steps at: http://www.cilium.io/try-mesos              
-                                                                      
+ following the steps at: http://www.cilium.io/try-mesos
+               
  If you want to learn more about Cilium: 
   - Visit: https://www.cilium.io/
   - Join us on slack: https://cilium.herokuapp.com/
