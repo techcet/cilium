@@ -19,16 +19,13 @@ desc_rate "Welcome to the Mesos Getting Started Guide demo."
 desc_rate "This demo shows a brief introduction to using Cilium with Mesos."
 desc_rate "The Mesos Master and Slave services as well as Cilium has already been set up."
 desc_rate "First, confirm that Cilium is up."
-
 run "cilium status"
-
 desc_rate "Next, start Marathon, the container scheduler".
 run "./start_marathon.sh"
-
 desc_rate "Start the web-server application."
-run "curl -i -H 'Content-Type: application/json' -d @web-server.json 127.0.0.1:8080/v2/apps"
-run "curl -i -H 'Content-Type: application/json' -d @goodclient.json 127.0.0.1:8080/v2/apps"
-run "curl -i -H 'Content-Type: application/json' -d @badclient.json 127.0.0.1:8080/v2/apps"
+run "eval curl -i -H 'Content-Type: application/json' -d @web-server.json 127.0.0.1:8080/v2/apps"
+run "eval curl -i -H 'Content-Type: application/json' -d @goodclient.json 127.0.0.1:8080/v2/apps"
+run "eval curl -i -H 'Content-Type: application/json' -d @badclient.json 127.0.0.1:8080/v2/apps"
 run "cilium endpoint list"
 
 #run "screen -AmdS goodclient"
