@@ -16,11 +16,11 @@ trap cleanup EXIT
 cleanup
 
 desc_rate "Welcome to the Cilium-Mesos Getting Started Guide demo."
-desc_rate "This demo shows a brief introduction of Cilium with Mesos by applying an HTTP policy, enforced between a web-server and client."
-desc_rate "The Mesos Master and Slave services as well as Cilium have already been set up."
+desc_rate "This demo shows a brief introduction of Cilium with Mesos by applying an HTTP policy, enforced between a web-server 
+and client. The Mesos Master and Slave services as well as Cilium have already been set up."
 desc_rate "First, confirm that Cilium is up."
 run "cilium status"
-desc_rate "Next, start the Marathon process for scheduling".
+desc_rate "Next, start the Marathon process for scheduling tasks".
 run "./start_marathon.sh"
 desc_rate "We will start the web-server application by submitting a task to the Marathon API via curl."
 desc_rate "The web-server traffic has the label \"web-server\"."
@@ -31,7 +31,7 @@ sleep 5
 desc_rate "Next, we will start the client task which retrieves URLs from the web-server."
 desc_rate "Similar to the web-server task, the client task is submitted to the Marathon API via curl."
 desc_rate "The client traffic has the label \"client\"."
-run "curl -i -H 'Content-Type: application/json' -d @client.json 127.0.0.1:8080/v2/apps"
+run "eval curl -i -H 'Content-Type: application/json' -d @client.json 127.0.0.1:8080/v2/apps"
 echo ""
 desc_rate "Cilium represents these workloads as endpoints, as observed with the following output:"
 run "cilium endpoint list"
@@ -43,7 +43,8 @@ desc_rate "With no policy enforced, the client can access both /public and /priv
 desc_rate "Let's apply a Layer-7 policy that allows the client to access only the /public URL."
 desc_rate "Here's a closer look at the L7 policy that we will apply:"
 run "cat l7-policy.json"
-desc_rate "Notice we are only allowing traffic labeled \"client\" to access the /public URL on \"web-server\". Let's import the policy into Cilium".
+desc_rate "Notice we are only allowing traffic labeled \"client\" to access the /public URL on \"web-server\". Let's import 
+the policy into Cilium".
 run "cilium policy import l7-policy.json"
 desc_rate "We can observe that the policy got enabled with the following output."
 run "cilium endpoint list"
