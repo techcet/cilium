@@ -20,7 +20,7 @@ desc_rate "This demo shows a brief introduction of Cilium with Mesos by applying
 desc_rate "The Mesos Master and Slave services as well as Cilium have already been set up."
 desc_rate "First, confirm that Cilium is up."
 run "cilium status"
-desc_rate "Next, start Marathon, the container scheduler".
+desc_rate "Next, start Marathon, for container scheduling".
 run "./start_marathon.sh"
 desc_rate "Start the web-server application and test it."
 run "eval curl -i -H 'Content-Type: application/json' -d @web-server.json 127.0.0.1:8080/v2/apps"
@@ -36,7 +36,7 @@ desc_rate "Let's observe what this task is doing by looking at the client log."
 trap ' ' INT
 run "./tail_client.sh client"
 # hit CTRL-c
-desc_rate "With no policy enforced, both the client can access /public and /private URLs from the web-server."
+desc_rate "With no policy enforced, the client can access both /public and /private URLs from the web-server."
 desc_rate "Let's apply a Layer-7 policy that allows the client to access only the /public URL."
 desc_rate "Here's a closer look at the L7 policy that we will apply:"
 run "cat l7-policy.json"
