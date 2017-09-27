@@ -15,8 +15,8 @@ function cleanup {
 trap cleanup EXIT
 cleanup
 
-desc_rate "Welcome to the Mesos Getting Started Guide demo."
-desc_rate "This demo shows a brief introduction to using Cilium with Mesos."
+desc_rate "Welcome to the Cilium-Mesos Getting Started Guide demo."
+desc_rate "This demo shows a brief introduction of Cilium with Mesos by applying an HTTP policy, enforced between a web-server and client."
 desc_rate "The Mesos Master and Slave services as well as Cilium have already been set up."
 desc_rate "First, confirm that Cilium is up."
 run "cilium status"
