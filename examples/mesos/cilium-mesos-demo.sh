@@ -20,14 +20,17 @@ desc_rate "This demo shows a brief introduction of Cilium with Mesos by applying
 desc_rate "The Mesos Master and Slave services as well as Cilium have already been set up."
 desc_rate "First, confirm that Cilium is up."
 run "cilium status"
-desc_rate "Next, start Marathon, for container scheduling".
+desc_rate "Next, start the Marathon process for scheduling".
 run "./start_marathon.sh"
-desc_rate "Start the web-server application and test it."
+desc_rate "Start the web-server application by submitting a task to the Marathon API via curl."
+desc_rate "The web-server task has the label \"web-server\"."
 run "eval curl -i -H 'Content-Type: application/json' -d @web-server.json 127.0.0.1:8080/v2/apps"
 echo ""
 sleep 5
 ./generate_client_file.sh client
-desc_rate "Next, start the client task, retrieving URLs from the web-server."
+desc_rate "Next, start the client task which retrieves URLs from the web-server."
+desc_rate "Similar to the web-server task, the client task is submitted to the Marathon API via curl."
+desc_rate "The client task has the label \"client\"."
 run "eval curl -i -H 'Content-Type: application/json' -d @client.json 127.0.0.1:8080/v2/apps"
 echo ""
 desc_rate "Cilium represents these workloads as endpoints, as observed with the following output:"
