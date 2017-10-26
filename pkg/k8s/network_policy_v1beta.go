@@ -39,13 +39,14 @@ func ExtractPolicyNameDeprecated(np *v1beta1.NetworkPolicy) string {
 // ParseNetworkPolicyDeprecated parses a k8s NetworkPolicy and returns a list of
 // Cilium policy rules that can be added
 func ParseNetworkPolicyDeprecated(np *v1beta1.NetworkPolicy) (api.Rules, error) {
-	ingress := api.IngressRule{}
+	ingresses := []api.IngressRule{}
 	namespace := ExtractNamespace(&np.ObjectMeta)
 	for _, iRule := range np.Spec.Ingress {
 		// Based on NetworkPolicyIngressRule docs:
 		//   From []NetworkPolicyPeer
 		//   If this field is empty or missing, this rule matches all
 		//   sources (traffic not restricted by source).
+		ingress := api.IngressRule{}
 		if iRule.From == nil || len(iRule.From) == 0 {
 			all := api.NewESFromLabels(
 				labels.NewLabel(labels.IDNameAll, "", labels.LabelSourceReserved),
@@ -91,9 +92,9 @@ func ParseNetworkPolicyDeprecated(np *v1beta1.NetworkPolicy) (api.Rules, error) 
 					continue
 				}
 
-				protocol := "tcp"
+				protocol := api.ProtoTCP
 				if port.Protocol != nil {
-					protocol = string(*port.Protocol)
+					protocol, _ = api.ParseL4Proto(string(*port.Protocol))
 				}
 
 				portStr := ""
@@ -110,6 +111,8 @@ func ParseNetworkPolicyDeprecated(np *v1beta1.NetworkPolicy) (api.Rules, error) 
 				ingress.ToPorts = append(ingress.ToPorts, portRule)
 			}
 		}
+
+		ingresses = append(ingresses, ingress)
 	}
 
 	tag := ExtractPolicyNameDeprecated(np)
@@ -121,10 +124,10 @@ func ParseNetworkPolicyDeprecated(np *v1beta1.NetworkPolicy) (api.Rules, error) 
 	rule := &api.Rule{
 		EndpointSelector: api.NewESFromK8sLabelSelector(labels.LabelSourceK8sKeyPrefix, &np.Spec.PodSelector),
 		Labels:           labels.ParseLabelArray(tag),
-		Ingress:          []api.IngressRule{ingress},
+		Ingress:          ingresses,
 	}
 
-	if err := rule.Validate(); err != nil {
+	if err := rule.Sanitize(); err != nil {
 		return nil, err
 	}
 

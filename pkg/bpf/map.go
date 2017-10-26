@@ -22,7 +22,10 @@ import (
 	"sync"
 	"unsafe"
 
-	log "github.com/Sirupsen/logrus"
+	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logfields"
+
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
 
@@ -108,7 +111,7 @@ type Map struct {
 	name string
 	path string
 	once sync.Once
-	lock sync.RWMutex
+	lock lock.RWMutex
 
 	// NonPersistent is true if the map does not contain persistent data
 	// and should be removed on startup.
@@ -116,7 +119,7 @@ type Map struct {
 }
 
 func NewMap(name string, mapType MapType, keySize int, valueSize int, maxEntries int, flags uint32) *Map {
-	return &Map{
+	m := &Map{
 		MapInfo: MapInfo{
 			MapType:       mapType,
 			KeySize:       uint32(keySize),
@@ -125,8 +128,10 @@ func NewMap(name string, mapType MapType, keySize int, valueSize int, maxEntries
 			Flags:         flags,
 			OwnerProgType: ProgTypeUnspec,
 		},
-		name: name,
+		name: path.Base(name),
 	}
+	m.setPathIfUnset()
+	return m
 }
 
 // WithNonPersistent turns the map non-persistent and returns the map
@@ -137,6 +142,15 @@ func (m *Map) WithNonPersistent() *Map {
 
 func (m *Map) GetFd() int {
 	return m.fd
+}
+
+// DeepEquals compares the current map against another map to see that the
+// attributes of the two maps are the same.
+func (m *Map) DeepEquals(other *Map) bool {
+	return m.MapInfo == other.MapInfo &&
+		m.name == other.name &&
+		m.path == other.path &&
+		m.NonPersistent == other.NonPersistent
 }
 
 func GetMapInfo(pid int, fd int) (*MapInfo, error) {
@@ -229,41 +243,52 @@ func (m *Map) migrate(fd int) (bool, error) {
 		return false, nil
 	}
 
+	scopedLog := log.WithField(logfields.Path, m.path)
 	mismatch := false
 
 	if info.MapType != m.MapType {
-		log.Infof("Map type mismatch for BPF map %s: old: %d new: %d",
-			m.path, info.MapType, m.MapType)
+		scopedLog.WithFields(log.Fields{
+			"old": info.MapType,
+			"new": m.MapType,
+		}).Info("Map type mismatch for BPF map")
 		mismatch = true
 	}
 
 	if info.KeySize != m.KeySize {
-		log.Infof("Key-size mismatch for BPF map %s: old: %d new: %d",
-			m.path, info.KeySize, m.KeySize)
+		scopedLog.WithFields(log.Fields{
+			"old": info.KeySize,
+			"new": m.KeySize,
+		}).Info("Key-size mismatch for BPF map")
 		mismatch = true
 	}
 
 	if info.ValueSize != m.ValueSize {
-		log.Infof("Value-size mismatch for BPF map %s: old: %d new: %d",
-			m.path, info.ValueSize, m.ValueSize)
+		scopedLog.WithFields(log.Fields{
+			"old": info.ValueSize,
+			"new": m.ValueSize,
+		}).Info("Value-size mismatch for BPF map")
 		mismatch = true
 	}
 
 	if info.MaxEntries != m.MaxEntries {
-		log.Infof("Max entries mismatch for BPF map %s: old: %d new: %d",
-			m.path, info.MaxEntries, m.MaxEntries)
+		scopedLog.WithFields(log.Fields{
+			"old": info.MaxEntries,
+			"new": m.MaxEntries,
+		}).Info("Max entries mismatch for BPF map")
 		mismatch = true
 	}
 
 	if info.Flags != m.Flags {
-		log.Infof("Flags mismatch for BPF map %s: old: %d new: %d",
-			m.path, info.Flags, m.Flags)
+		scopedLog.WithFields(log.Fields{
+			"old": info.Flags,
+			"new": m.Flags,
+		}).Info("Flags mismatch for BPF map")
 		mismatch = true
 	}
 	if mismatch {
 		b, err := m.containsEntries()
 		if err == nil && !b {
-			log.Infof("Safely removing empty map %s so it can be recreated", m.path)
+			scopedLog.Info("Safely removing empty map so it can be recreated")
 			os.Remove(m.path)
 			return true, nil
 		}
@@ -351,6 +376,7 @@ func (m *Map) Close() error {
 
 type DumpParser func(key []byte, value []byte) (MapKey, MapValue, error)
 type DumpCallback func(key MapKey, value MapValue)
+type MapValidator func(path string) (bool, error)
 
 func (m *Map) Dump(parser DumpParser, cb DumpCallback) error {
 	m.lock.RLock()

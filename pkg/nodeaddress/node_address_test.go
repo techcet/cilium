@@ -21,6 +21,7 @@ import (
 )
 
 func (s *NodeAddressSuite) TestMaskCheck(c *C) {
+	InitDefaultPrefix("")
 	SetIPv4ClusterCidrMaskSize(24)
 
 	_, cidr, _ := net.ParseCIDR("1.1.1.1/16")
@@ -38,4 +39,8 @@ func (s *NodeAddressSuite) TestMaskCheck(c *C) {
 	// OK, cluster /8 < per node alloc prefix /16
 	SetIPv4ClusterCidrMaskSize(8)
 	c.Assert(ValidatePostInit(), IsNil)
+
+	c.Assert(IsHostIPv4(GetInternalIPv4()), Equals, true)
+	c.Assert(IsHostIPv4(GetExternalIPv4()), Equals, true)
+	c.Assert(IsHostIPv6(GetIPv6()), Equals, true)
 }

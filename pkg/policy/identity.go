@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	secLabelTimeout = time.Duration(120 * time.Second)
+	secLabelTimeout = 120 * time.Second
 
 	// MinimalNumericIdentity represents the minimal numeric identity not
 	// used for reserved purposes.
@@ -68,11 +68,12 @@ func (id NumericIdentity) Uint32() uint32 {
 type Identity struct {
 	// Identity's ID.
 	ID NumericIdentity `json:"id"`
-	// Endpoints that have this Identity where their value is the last time they were seen.
+	// Set of labels that belong to this Identity.
 	Labels labels.Labels `json:"labels"`
 	// SHA256 of labels.
 	LabelsSHA256 string `json:"labelsSHA256"`
-	// Set of labels that belong to this Identity.
+	// Endpoints that have this Identity where their value is the last time they were seen.
+	// Also, If an identity is no longer used (i.e. all endpoints have disassociated from it) we can recycle the identity.
 	Endpoints map[string]time.Time `json:"containers"`
 }
 
@@ -92,6 +93,21 @@ func NewIdentityFromModel(base *models.Identity) *Identity {
 	}
 
 	return id
+}
+
+// GetLabelsSHA256 returns the SHA256 of the labels associated with the
+// identity. The SHA is calculated if not already cached.
+func (id *Identity) GetLabelsSHA256() string {
+	if id.LabelsSHA256 == "" {
+		id.LabelsSHA256 = id.Labels.SHA256Sum()
+	}
+
+	return id.LabelsSHA256
+}
+
+// StringID returns the identity identifier as string
+func (id *Identity) StringID() string {
+	return id.ID.StringID()
 }
 
 func (id *Identity) GetModel() *models.Identity {
@@ -158,19 +174,30 @@ func (id *Identity) RefCount() int {
 }
 
 const (
-	ID_UNKNOWN NumericIdentity = iota
-	ID_HOST
-	ID_WORLD
+	// IdentityUnknown represents an unknown identity
+	IdentityUnknown NumericIdentity = iota
+
+	// ReservedIdentityHost represents the local host
+	ReservedIdentityHost
+
+	// ReservedIdentityWorld represents any endpoint outside of the cluster
+	ReservedIdentityWorld
+
+	// ReservedIdentityCluster represents any endpoint inside the cluster
+	// that does not have a more specific identity
+	ReservedIdentityCluster
 )
 
 var (
 	ReservedIdentities = map[string]NumericIdentity{
-		labels.IDNameHost:  ID_HOST,
-		labels.IDNameWorld: ID_WORLD,
+		labels.IDNameHost:    ReservedIdentityHost,
+		labels.IDNameWorld:   ReservedIdentityWorld,
+		labels.IDNameCluster: ReservedIdentityCluster,
 	}
 	ReservedIdentityNames = map[NumericIdentity]string{
-		ID_HOST:  labels.IDNameHost,
-		ID_WORLD: labels.IDNameWorld,
+		ReservedIdentityHost:    labels.IDNameHost,
+		ReservedIdentityWorld:   labels.IDNameWorld,
+		ReservedIdentityCluster: labels.IDNameCluster,
 	}
 )
 
@@ -178,5 +205,5 @@ func GetReservedID(name string) NumericIdentity {
 	if v, ok := ReservedIdentities[name]; ok {
 		return v
 	}
-	return ID_UNKNOWN
+	return IdentityUnknown
 }

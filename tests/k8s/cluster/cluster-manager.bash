@@ -7,11 +7,12 @@ dir=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )
 
 etcd_version="v3.1.0"
 k8s_version=${k8s_version:-"1.7.4-00"}
+docker_image_tag=${DOCKER_IMAGE_TAG:-"local_build"}
 
 certs_dir="${dir}/certs"
 k8s_dir="${dir}/k8s"
 cilium_dir="${dir}/cilium"
-rbac_yaml="${dir}/../../../examples/kubernetes/rbac.yaml"
+cilium_original="${dir}/../../../examples/kubernetes/cilium.yaml"
 
 function get_options(){
     if [[ "${1}" == "ipv6" ]]; then
@@ -192,21 +193,6 @@ function install_kubeadm() {
     sudo apt-get -qq install --allow-downgrades -y kubelet=${k8s_version} kubeadm=${k8s_version} kubectl=${k8s_version} kubernetes-cni
 }
 
-function install_cilium_config(){
-    sudo mkdir -p /var/lib/cilium
-
-    sudo cp "${certs_dir}/ca.pem" \
-       "/var/lib/cilium/etcd-ca.pem"
-
-    sudo tee /var/lib/cilium/etcd-config.yml <<EOF
----
-endpoints:
-- https://${controller_ip_brackets}:2379
-ca-file: '/var/lib/cilium/etcd-ca.pem'
-EOF
-
-}
-
 function start_etcd(){
     sudo systemctl daemon-reload
     sudo systemctl enable etcd
@@ -250,8 +236,6 @@ function fresh_install(){
     
     clean_kubeadm
     start_kubeadm
-
-    install_cilium_config
 }
 
 function reinstall(){
@@ -299,8 +283,6 @@ function reinstall(){
         start_etcd
     fi
     start_kubeadm
-
-    install_cilium_config
 }
 
 function deploy_cilium(){
@@ -319,7 +301,7 @@ function deploy_cilium(){
     source "${dir}/env.bash"
 
     rm "${cilium_dir}/cilium-lb-ds.yaml" \
-       "${cilium_dir}/cilium-ds.yaml" \
+       "${cilium_dir}/cilium.yaml" \
         2>/dev/null
 
     if [[ -n "${lb}" ]]; then
@@ -327,19 +309,26 @@ function deploy_cilium(){
         # enp0s8, the interface with IP 192.168.36.11.
         iface='enp0s8'
 
+        # FIXME: do we still need LB tests?
+
         sed -e "s+\$disable_ipv4+${disable_ipv4}+g;\
                 s+\$iface+${iface}+g" \
             "${cilium_dir}/cilium-lb-ds.yaml.sed" > "${cilium_dir}/cilium-lb-ds.yaml"
 
-        kubectl create -f "${cilium_dir}"
+        kubectl create -f "${cilium_dir}/cilium-lb-ds.yaml"
 
         wait_for_daemon_set_ready kube-system cilium 1
     else
-        sed -e "s+\$disable_ipv4+${disable_ipv4}+g" \
-            "${cilium_dir}/cilium-ds.yaml.sed" > "${cilium_dir}/cilium-ds.yaml"
+        # We still need to make some small modifications to the original cilium
+        sed -e "s+- http://127.0.0.1:2379+- https://${controller_ip_brackets}:2379+g;\
+                s+image: cilium/cilium:stable+image: cilium:${docker_image_tag}+g;\
+                s+imagePullPolicy: Always+imagePullPolicy: Never+g;\
+                s+debug: \"false\"+debug: \"true\"+g;\
+                s+#ca-file: '+ca-file: '+g;\
+                s+etcd-ca: \"\"+etcd-ca: \""$(base64 -w 0 "${certs_dir}/ca.pem")"\"+g" \
+            "${cilium_original}" > "${cilium_dir}/cilium.yaml"
 
-        kubectl create -f "${rbac_yaml}"
-        kubectl create -f "${cilium_dir}"
+        kubectl create -f "${cilium_dir}/cilium.yaml"
 
         wait_for_daemon_set_ready kube-system cilium 2
     fi

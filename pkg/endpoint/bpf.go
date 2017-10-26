@@ -38,12 +38,12 @@ import (
 	"github.com/cilium/cilium/pkg/u8proto"
 	"github.com/cilium/cilium/pkg/version"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
 	// ExecTimeout is the execution timeout to use in join_ep.sh executions
-	ExecTimeout = time.Duration(30 * time.Second)
+	ExecTimeout = 30 * time.Second
 )
 
 func (e *Endpoint) writeL4Map(fw *bufio.Writer, owner Owner, m policy.L4PolicyMap, config string) error {
@@ -52,7 +52,7 @@ func (e *Endpoint) writeL4Map(fw *bufio.Writer, owner Owner, m policy.L4PolicyMa
 
 	for _, l4 := range m {
 		// Represents struct l4_allow in bpf/lib/l4.h
-		protoNum, err := u8proto.ParseProtocol(l4.Protocol)
+		protoNum, err := u8proto.ParseProtocol(string(l4.Protocol))
 		if err != nil {
 			return fmt.Errorf("invalid protocol %s", l4.Protocol)
 		}
@@ -98,17 +98,15 @@ func (e *Endpoint) writeL4Policy(fw *bufio.Writer, owner Owner) error {
 		return nil
 	}
 
-	policy := e.Consumable.L4Policy
+	l4policy := e.Consumable.L4Policy
 
-	if err := e.writeL4Map(fw, owner, policy.Ingress, "CFG_L4_INGRESS"); err != nil {
+	fmt.Fprintf(fw, "#define HAVE_L4_POLICY\n")
+
+	if err := e.writeL4Map(fw, owner, l4policy.Ingress, "CFG_L4_INGRESS"); err != nil {
 		return err
 	}
 
-	if err := e.writeL4Map(fw, owner, policy.Egress, "CFG_L4_EGRESS"); err != nil {
-		return err
-	}
-
-	return nil
+	return e.writeL4Map(fw, owner, l4policy.Egress, "CFG_L4_EGRESS")
 }
 
 func (e *Endpoint) writeHeaderfile(prefix string, owner Owner) error {
@@ -307,8 +305,10 @@ func writeGeneve(prefix string, e *Endpoint) ([]byte, error) {
 }
 
 func (e *Endpoint) runInit(libdir, rundir, epdir, debug string) error {
+	e.Mutex.RLock()
 	args := []string{libdir, rundir, epdir, e.IfName, debug}
 	prog := filepath.Join(libdir, "join_ep.sh")
+	e.Mutex.RUnlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), ExecTimeout)
 	defer cancel()
@@ -340,9 +340,12 @@ func (e *Endpoint) regenerateBPF(owner Owner, epdir string) error {
 	owner.GetCompilationLock().RLock()
 	defer owner.GetCompilationLock().RUnlock()
 
+	e.Mutex.RLock()
 	if err = e.writeHeaderfile(epdir, owner); err != nil {
+		e.Mutex.RUnlock()
 		return fmt.Errorf("unable to write header file: %s", err)
 	}
+	e.Mutex.RUnlock()
 
 	// If dry mode is enabled, no changes to BPF maps are performed
 	if owner.DryModeEnabled() {
@@ -358,6 +361,7 @@ func (e *Endpoint) regenerateBPF(owner Owner, epdir string) error {
 	createdIPv4EgressMap := false
 	defer func() {
 		if err != nil {
+			e.Mutex.Lock()
 			if createdPolicyMap {
 				// Remove policy map file only if it was created
 				// in this update cycle
@@ -380,12 +384,16 @@ func (e *Endpoint) regenerateBPF(owner Owner, epdir string) error {
 			if createdIPv4EgressMap {
 				e.L3Maps.DestroyBpfMap(IPv4Egress, e.IPv4EgressMapPathLocked())
 			}
+			e.Mutex.Unlock()
 		}
 	}()
+
+	e.Mutex.Lock()
 
 	if e.PolicyMap == nil {
 		e.PolicyMap, createdPolicyMap, err = policymap.OpenMap(e.PolicyMapPathLocked())
 		if err != nil {
+			e.Mutex.Unlock()
 			return err
 		}
 	}
@@ -435,6 +443,8 @@ func (e *Endpoint) regenerateBPF(owner Owner, epdir string) error {
 		}
 	}
 
+	e.Mutex.Unlock()
+
 	libdir := owner.GetBpfDir()
 	rundir := owner.GetStateDir()
 	debug := strconv.FormatBool(owner.DebugEnabled())
@@ -449,7 +459,7 @@ func (e *Endpoint) regenerateBPF(owner Owner, epdir string) error {
 	// Mark the endpoint to be running the policy revision it was
 	// compiled for
 	if err == nil {
-		e.PolicyRevision = e.NextPolicyRevision
+		e.bumpPolicyRevision()
 	}
 
 	return err

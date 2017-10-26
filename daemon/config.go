@@ -18,11 +18,10 @@ import (
 	"net"
 	"os"
 	"runtime"
-	"sync"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/daemon/options"
-	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -39,30 +38,29 @@ const (
 	// to reach particular endpoints or policy enforcement must be
 	// disabled.
 	AllowLocalhostPolicy = "policy"
+
+	// ModePreFilterNative for loading progs with xdpdrv
+	ModePreFilterNative = "native"
+
+	// ModePreFilterGeneric for loading progs with xdpgeneric
+	ModePreFilterGeneric = "generic"
 )
 
 // Config is the configuration used by Daemon.
 type Config struct {
-	BpfDir         string     // BPF template files directory
-	LibDir         string     // Cilium library files directory
-	RunDir         string     // Cilium runtime directory
-	NAT46Prefix    *net.IPNet // NAT46 IPv6 Prefix
-	Device         string     // Receive device
-	HostV4Addr     net.IP     // Host v4 address of the snooping device
-	HostV6Addr     net.IP     // Host v6 address of the snooping device
-	DockerEndpoint string     // Docker endpoint
-	IPv4Disabled   bool       // Disable IPv4 allocation
-	K8sEndpoint    string     // Kubernetes endpoint
-	K8sCfgPath     string     // Kubeconfig path
-	LBInterface    string     // Set with name of the interface to loadbalance packets from
-
-	EnablePolicyMU sync.RWMutex // Protects the variable below
-	EnablePolicy   string       // Whether policy enforcement is enabled.
+	BpfDir          string     // BPF template files directory
+	LibDir          string     // Cilium library files directory
+	RunDir          string     // Cilium runtime directory
+	NAT46Prefix     *net.IPNet // NAT46 IPv6 Prefix
+	Device          string     // Receive device
+	DevicePreFilter string     // XDP device
+	ModePreFilter   string     // XDP mode, values: { native | generic }
+	HostV4Addr      net.IP     // Host v4 address of the snooping device
+	HostV6Addr      net.IP     // Host v6 address of the snooping device
+	IPv4Disabled    bool       // Disable IPv4 allocation
+	LBInterface     string     // Set with name of the interface to loadbalance packets from
 
 	Tunnel string // Tunnel mode
-
-	ValidLabelPrefixesMU sync.RWMutex           // Protects the 2 variables below
-	ValidLabelPrefixes   *labels.LabelPrefixCfg // Label prefixes used to filter from all labels
 
 	DryMode       bool // Do not create BPF maps, devices, ..
 	RestoreState  bool // RestoreState restores the state from previous running daemons.
@@ -85,7 +83,7 @@ type Config struct {
 	Opts *option.BoolOptions
 
 	// Mutex for serializing configuration updates to the daemon.
-	ConfigPatchMutex sync.RWMutex
+	ConfigPatchMutex lock.RWMutex
 
 	// Monitor contains the configuration for the node monitor.
 	Monitor *models.MonitorStatus
@@ -96,11 +94,6 @@ func NewConfig() *Config {
 		Opts:    option.NewBoolOptions(&options.Library),
 		Monitor: &models.MonitorStatus{Cpus: int64(runtime.NumCPU()), Npages: 64, Pagesize: int64(os.Getpagesize()), Lost: 0, Unknown: 0},
 	}
-}
-
-// IsK8sEnabled checks if Cilium is being used in tandem with Kubernetes.
-func (c *Config) IsK8sEnabled() bool {
-	return c.K8sEndpoint != "" || c.K8sCfgPath != ""
 }
 
 func (c *Config) IsLBEnabled() bool {

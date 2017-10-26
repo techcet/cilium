@@ -158,8 +158,8 @@ worker nodes.
 Should you encounter any issues during the installation, please refer to the
 :ref:`troubleshooting_k8s` section and / or seek help on `Slack channel`_.
 
-TL;DR Version (Expert Mode)
-===========================
+Quick Guide
+===========
 
 If you know what you are doing, then the following quick instructions get you
 started in the shortest time possible. If you require additional details or are
@@ -173,34 +173,48 @@ chapter.
 
 	mount bpffs /sys/fs/bpf -t bpf
 
-2. Download the DaemonSet_ template ``cilium-ds.yaml`` and specify the k8s API
-   server and Key-Value store addresses:
+2. Download the DaemonSet_ template ``cilium.yaml`` and specify the etcd address:
+
+.. parsed-literal::
+
+    $ wget \ |SCM_WEB|\/examples/kubernetes/cilium.yaml
+    $ vim cilium.yaml
+    [adjust the etcd address]
+
+**Optional:** If you want to adjust the MTU of the pods, define the ``MTU`` environment
+variable in the ``env`` section:
 
 .. code:: bash
 
-    $ wget https://raw.githubusercontent.com/cilium/cilium/master/examples/kubernetes/cilium-ds.yaml
-    $ vim cilium-ds.yaml
-    [adjust --k8s-api-server or --k8s-kubeconfig-path]
-    [adjust --kvstore and --kvstore-opts]
+    env:
+      - name: "MTU"
+        value: "8950"
 
-3. Deploy the ``cilium`` DaemonSet_
+3. Deploy ``cilium`` with your local changes
 
 .. code:: bash
 
-    $ kubectl create -f cilium-ds.yaml
+    $ kubectl create -f ./cilium.yaml
+    clusterrole "cilium" created
+    serviceaccount "cilium" created
+    clusterrolebinding "cilium" created
+    configmap "cilium-config" created
+    secret "cilium-etcd-secrets" created
     daemonset "cilium" created
 
     $ kubectl get ds --namespace kube-system
     NAME            DESIRED   CURRENT   READY     NODE-SELECTOR   AGE
     cilium          1         1         1         <none>          2m
 
+You have cilium deployed in your cluster and ready to use.
+
 .. _admin_mount_bpffs:
 
-Step by Step Instructions
-=========================
+Detailed Step by Step Instructions
+==================================
 
-Mounting the BPF FS 
--------------------
+Mounting the BPF FS (Optional)
+------------------------------
 
 This step is optional but recommended. It allows the ``cilium-agent`` to pin
 BPF resources to a persistent filesystem and make them persistent across
@@ -287,8 +301,31 @@ There are many ways to install CNI_, the following is an example:
 Adjusting CNI configuration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-If you want to adjust the CNI configuration you may do so by creating the CNI
-configuration ``/etc/cni/net.d/10-cilium.conf`` manually:
+The CNI installation can be configured with environment variables. These
+environment variables can be specified in the DaemonSet file like this:
+
+.. code:: bash
+
+    env:
+      - name: "MTU"
+        value: "8950"
+
+The following variables are supported:
+
++---------------------+--------------------------------------+------------------------+
+| Option              | Description                          | Default                |
++---------------------+--------------------------------------+------------------------+
+| MTU                 | Pod MTU to be configured s           | 1450                   |
++---------------------+--------------------------------------+------------------------+
+| HOST_PREFIX         | Path prefix of all host mounts       | /host                  |
++---------------------+--------------------------------------+------------------------+
+| CNI_DIR             | Path to mounted CNI directory        | ${HOST_PREFIX}/opt/cni |
++---------------------+--------------------------------------+------------------------+
+| CNI_CONF_NAME       | Name of configuration file           | 10-cilium.conf         |
++---------------------+--------------------------------------+------------------------+
+
+If you want to further adjust the CNI configuration you may do so by creating
+the CNI configuration ``/etc/cni/net.d/10-cilium.conf`` manually:
 
 .. code:: bash
 
@@ -303,51 +340,23 @@ configuration ``/etc/cni/net.d/10-cilium.conf`` manually:
 Cilium will use any existing ``/etc/cni/net.d/10-cilium.conf`` file if it
 already exists on a worker node and only creates it if it does not exist yet.
 
-
-.. _rbac_integration:
-
-RBAC integration
-----------------
-
-If you have RBAC_ enabled in your Kubernetes cluster, create appropriate
-cluster roles and service accounts for Cilium:
-
-.. code:: bash
-
-    $ kubectl create -f https://raw.githubusercontent.com/cilium/cilium/master/examples/kubernetes/rbac.yaml
-    clusterrole "cilium" created
-    serviceaccount "cilium" created
-    clusterrolebinding "cilium" created
-
-.. _ds_config:
-
-Configuring the DaemonSet
--------------------------
-
-.. code:: bash
-
-    $ wget https://raw.githubusercontent.com/cilium/cilium/master/examples/kubernetes/cilium-ds.yaml
-    $ vim cilium-ds.yaml
-
-The following configuration options *must* be specified:
-
-- ``--k8s-api-server`` or ``--k8s-kubeconfig-path`` must point to at least one
-  Kubernetes API server address.
-- ``--kvstore`` with optional ``--kvstore-opts`` to configure the Key-Value
-  store.  See section :ref:`install_kvstore` for additional details on how to
-  configure the Key-Value store.
-
 .. _ds_deploy:
 
 Deploying the DaemonSet
 -----------------------
 
-After configuring the ``cilium`` DaemonSet_ it is time to deploy it using
+.. parsed-literal::
+
+    $ wget \ |SCM_WEB|\/examples/kubernetes/cilium.yaml
+    $ vim cilium.yaml
+    [adjust the etcd address]
+
+After configuring the ``cilium`` ConfigMap_ it is time to deploy it using
 ``kubectl``:
 
 .. code:: bash
 
-    $ kubectl create -f cilium-ds.yaml
+    $ kubectl create -f cilium.yaml
 
 Kubernetes will deploy the ``cilium`` DaemonSet_ as a pod in the ``kube-system``
 namespace on all worker nodes. This operation is performed in the background.
@@ -405,7 +414,7 @@ Deploying to selected nodes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To deploy Cilium only to a selected list of worker nodes, you can add a
-NodeSelector_ to the ``cilium-ds.yaml`` file like this:
+NodeSelector_ to the ``cilium.yaml`` file like this:
 
 .. code:: bash
 
@@ -553,9 +562,9 @@ Docker compose.
 Note: for multi-host deployments using a key-value store, you would want to
 update this template to point cilium to a central key-value store.
 
-.. code:: bash
+.. parsed-literal::
 
-    $ wget https://raw.githubusercontent.com/cilium/cilium/master/examples/docker-compose/docker-compose.yml
+    $ wget \ |SCM_WEB|\/examples/docker-compose/docker-compose.yml
     $ IFACE=eth1 docker-compose up
     [...]
 
@@ -791,7 +800,53 @@ Make sure that you set the version of the kube-apiserver to whatever version you
 
     quay.io/coreos/hyperkube:v${KUBE_VERSION}_coreos.0
 
-Step 6: Start Services on Nodes
+Step 6: Setup kube-proxy on master nodes
+----------------------------------------
+
+The next step is to setup kube-proxy as a static pod on all master nodes.
+Create the file ``/etc/kubernetes/manifests/kube-proxy.yaml`` and substitute
+the following variables:
+
+* ``${CLUSTER_CIDR}`` with the CIDR range for pods in your cluster.
+* ``${KUBE_VERSION}`` with a version  ``>= 1.6.4``.
+
+::
+
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: kube-proxy
+      namespace: kube-system
+      annotations:
+        rkt.alpha.kubernetes.io/stage1-name-override: coreos.com/rkt/stage1-fly
+    spec:
+      hostNetwork: true
+      containers:
+      - name: kube-proxy
+        image: quay.io/coreos/hyperkube:v'"${KUBE_VERSION}"'_coreos.0
+        command:
+        - /hyperkube
+        - proxy
+        - --master=http://127.0.0.1:8080
+        - --cluster-cidr=${CLUSTER_CIDR}
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /etc/ssl/certs
+          name: ssl-certs-host
+          readOnly: true
+        - mountPath: /var/run/dbus
+          name: dbus
+          readOnly: false
+      volumes:
+      - hostPath:
+          path: /usr/share/ca-certificates
+        name: ssl-certs-host
+      - hostPath:
+          path: /var/run/dbus
+        name: dbus
+
+Step 7: Start Services on Nodes
 -------------------------------
 
 Start kubelet on all nodes:
@@ -806,13 +861,13 @@ To have kubelet start after a reboot, run:
 
     sudo systemctl enable kubelet
 
-Step 7: Health Check of Kubernetes Services
+Step 8: Health Check of Kubernetes Services
 -------------------------------------------
 
 Follow `the CoreOS instructions to health check Kubernetes services <https://coreos.com/kubernetes/docs/latest/deploy-master.html#basic-health-checks>`_.
 
 
-Step 8: Setup Kubectl to Communicate With Your Cluster
+Step 9: Setup Kubectl to Communicate With Your Cluster
 ------------------------------------------------------
 
 Follow `the CoreOS instructions to download kubectl <https://coreos.com/kubernetes/docs/latest/configure-kubectl.html#download-the-kubectl-executable>`_.
@@ -831,19 +886,17 @@ Follow `the CoreOS instructions to download kubectl <https://coreos.com/kubernet
 
 This will populate the Kubeconfig file with the contents of the certificates, which is needed for Cilium to authenticate against the Kubernetes API when it is launched in the next step.
 
-Alternatively, you can run the above commands without ``--embed-certs=true``, and then mount the paths to the certificates and keys from the host filesystem in `cilium-ds.yaml`. 
+Alternatively, you can run the above commands without ``--embed-certs=true``, and then mount the paths to the certificates and keys from the host filesystem in `cilium.yaml`.
 
 Follow `the CoreOS instructions to validate that kubectl has been configured correctly <https://coreos.com/kubernetes/docs/latest/configure-kubectl.html#verify-kubectl-configuration-and-connection>`_.
 
 
 .. _cilium-daemonset-deployment:
 
-Step 9: Deploy Cilium DaemonSet
--------------------------------
+Step 10: Deploy Cilium DaemonSet
+--------------------------------
 
-* If your cluster is using RBAC, refer to :ref:`rbac_integration`.
-* Follow the instructions for :ref:`ds_config` and :ref:`ds_deploy`. We recommend using the etcd cluster you have set up as the key-value store for Cilium.
-    * NOTE: before you deploy the cilium DaemonSet, make sure you change the image for cilium to be "latest" instead of "stable". Once Cilium 0.10 is released, this is not necessary.
+* Follow the instructions for :ref:`ds_deploy`. We recommend using the etcd cluster you have set up as the key-value store for Cilium.
 
 Setup Worker Nodes
 ==================
@@ -915,9 +968,9 @@ Since we are setting up Kubelet to use Cilium, we want to configure its networki
       --mount volume=cni-bin,target=/opt/cni/bin \
       --volume etc-cni,kind=host,source=/etc/cni/net.d \
       --mount volume=etc-cni,target=/etc/cni/net.d"
-     ExecStartPre=/bin/bash -c ' \\
-       if [[ \$(/bin/mount | /bin/grep /sys/fs/bpf -c) -eq 0 ]]; then \\
-         /bin/mount bpffs /sys/fs/bpf -t bpf; \\
+     ExecStartPre=/bin/bash -c ' \
+       if [[ $(/bin/mount | /bin/grep /sys/fs/bpf -c) -eq 0 ]]; then \
+         /bin/mount bpffs /sys/fs/bpf -t bpf; \
        fi'
      ExecStartPre=/usr/bin/mkdir -p /etc/cni/net.d
      ExecStartPre=/usr/bin/mkdir -p /opt/cni/bin
@@ -937,8 +990,7 @@ Since we are setting up Kubelet to use Cilium, we want to configure its networki
       --kubeconfig=/etc/kubernetes/worker-kubeconfig.yaml \
       --tls-cert-file=/etc/kubernetes/ssl/worker.pem \
       --tls-private-key-file=/etc/kubernetes/ssl/worker-key.pem \
-      --cluster-domain=cluster.local \
-      --make-iptables-util-chains=false
+      --cluster-domain=cluster.local
      ExecStop=-/usr/bin/rkt stop --uuid-file=/var/run/kubelet-pod.uuid
      Restart=always
      RestartSec=10
@@ -946,12 +998,71 @@ Since we are setting up Kubelet to use Cilium, we want to configure its networki
      [Install]
      WantedBy=multi-user.target
 
-Step 3: Setup Worker kubeconfig
+Step 3: Setup kube-proxy on worker nodes
+----------------------------------------
+
+The next step is to setup kube-proxy as a static pod on all worker nodes.
+Create the file ``/etc/kubernetes/manifests/kube-proxy.yaml`` and substitute
+the following variables:
+
+* ``${KUBE_VERSION}`` with a version  ``>= 1.6.4``.
+* ``${MASTER_HOST}`` with the IP of the master node.
+* ``${CLUSTER_CIDR}`` with the CIDR range for pods in your cluster.
+
+::
+
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: kube-proxy
+      namespace: kube-system
+      annotations:
+        rkt.alpha.kubernetes.io/stage1-name-override: coreos.com/rkt/stage1-fly
+    spec:
+      hostNetwork: true
+      containers:
+      - name: kube-proxy
+        image: quay.io/coreos/hyperkube:v'"${KUBE_VERSION}"'_coreos.0
+        command:
+        - /hyperkube
+        - proxy
+        - --master=${MASTER_HOST}
+        - --cluster-cidr=${CLUSTER_CIDR}
+        - --kubeconfig=/etc/kubernetes/worker-kubeconfig.yaml
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - mountPath: /etc/ssl/certs
+          name: "ssl-certs"
+        - mountPath: /etc/kubernetes/worker-kubeconfig.yaml
+          name: "kubeconfig"
+          readOnly: true
+        - mountPath: /etc/kubernetes/ssl
+          name: "etc-kube-ssl"
+          readOnly: true
+        - mountPath: /var/run/dbus
+          name: dbus
+          readOnly: false
+      volumes:
+      - name: "ssl-certs"
+        hostPath:
+          path: "/usr/share/ca-certificates"
+      - name: "kubeconfig"
+        hostPath:
+          path: "/etc/kubernetes/worker-kubeconfig.yaml"
+      - name: "etc-kube-ssl"
+        hostPath:
+          path: "/etc/kubernetes/ssl"
+      - hostPath:
+          path: /var/run/dbus
+        name: dbus
+
+Step 4: Setup Worker kubeconfig
 -------------------------------
 
 Cilium has no special requirements for setting up the ``kubeconfig`` for ``kubelet`` on worker nodes. Please follow `the CoreOS instructions to setup the worker-kubeconfig <https://coreos.com/kubernetes/docs/latest/deploy-workers.html#set-up-kubeconfig>`_.
 
-Step 4: Start Services
+Step 5: Start Services
 ----------------------
 
 Start kubelet on all nodes:
@@ -966,12 +1077,12 @@ To have kubelet start after a reboot, run:
  
     sudo systemctl enable kubelet
 
-Step 5: Make Sure Cilium Runs On Worker Nodes
+Step 6: Make Sure Cilium Runs On Worker Nodes
 ---------------------------------------------
 
 When we deployed Cilium as part of :ref:`cilium-daemonset-deployment`, the Daemon Set expects the Kubeconfig to be located at the same location on each node in the cluster. So, you need to make sure that the location and contents of the kubeconfig for the worker node is the same as that which Cilium is using on the master nodes, e.g., ``~/.kube/config``.
 
-Step 6: Setup kubectl and deploy add-ons
+Step 7: Setup kubectl and deploy add-ons
 ----------------------------------------
 
 Follow `the CoreOS instructions for setting up kube-dns and kube-dashboard <https://coreos.com/kubernetes/docs/latest/deploy-addons.html>`_.
@@ -1151,6 +1262,7 @@ Example of the etcd configuration file:
 
 .. _Slack channel: https://cilium.herokuapp.com
 .. _DaemonSet: https://kubernetes.io/docs/admin/daemons/
+.. _ConfigMap: https://kubernetes.io/docs/tasks/configure-pod-container/configmap/
 .. _NodeSelector: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/
 .. _RBAC: https://kubernetes.io/docs/admin/authorization/rbac/
 .. _CNI: https://github.com/containernetworking/cni

@@ -20,19 +20,20 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/cilium/cilium/common"
 	"github.com/cilium/cilium/common/types"
+	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logfields"
 	"github.com/cilium/cilium/pkg/policy"
 
-	log "github.com/Sirupsen/logrus"
 	client "github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/clientv3/concurrency"
 	clientyaml "github.com/coreos/etcd/clientv3/yaml"
 	"github.com/coreos/etcd/mvcc/mvccpb"
 	"github.com/hashicorp/go-version"
+	log "github.com/sirupsen/logrus"
 	ctx "golang.org/x/net/context"
 )
 
@@ -57,10 +58,10 @@ var EtcdOpts = map[string]bool{
 
 type EtcdClient struct {
 	cli         *client.Client
-	sessionMU   sync.RWMutex
+	sessionMU   lock.RWMutex
 	session     *concurrency.Session
-	lockPathsMU sync.Mutex
-	lockPaths   map[string]*sync.Mutex
+	lockPathsMU lock.Mutex
+	lockPaths   map[string]*lock.Mutex
 }
 
 type EtcdLocker struct {
@@ -97,10 +98,10 @@ func newEtcdClient(config *client.Config, cfgPath string) (KVClient, error) {
 	ec := &EtcdClient{
 		cli:       c,
 		session:   s,
-		lockPaths: map[string]*sync.Mutex{},
+		lockPaths: map[string]*lock.Mutex{},
 	}
 	if err := ec.CheckMinVersion(15 * time.Second); err != nil {
-		log.Fatalf("%s", err)
+		log.WithError(err).Fatal("Error checking etcd min version")
 	}
 	// Clean-up old services path
 	ec.DeleteTree(common.ServicePathV1)
@@ -109,17 +110,15 @@ func newEtcdClient(config *client.Config, cfgPath string) (KVClient, error) {
 			<-ec.session.Done()
 			newSession, err := concurrency.NewSession(c)
 			if err != nil {
-				log.Warningf("Error while renewing etcd session %s", err)
+				log.WithError(err).Warn("Error while renewing etcd session")
 				time.Sleep(3 * time.Second)
 			} else {
 				ec.sessionMU.Lock()
 				ec.session = newSession
 				ec.sessionMU.Unlock()
-				log.WithFields(log.Fields{
-					fieldSession: newSession,
-				}).Debugf("Renewing session")
+				log.WithField(fieldSession, newSession).Debug("Renewing session")
 				if err := ec.CheckMinVersion(10 * time.Second); err != nil {
-					log.Fatalf("%s", err)
+					log.WithError(err).Fatal("Error checking etcd min version")
 				}
 			}
 		}
@@ -150,8 +149,8 @@ func (e *EtcdClient) CheckMinVersion(timeout time.Duration) error {
 	for _, ep := range eps {
 		v, err := getEPVersion(e.cli.Maintenance, ep, timeout)
 		if err != nil {
-			log.WithError(err).Debugf("Unable to check etcd min version")
-			log.WithError(err).Warningf("Checking version of etcd endpoint %q", ep)
+			log.WithError(err).Debug("Unable to check etcd min version")
+			log.WithError(err).WithField(fieldEtcdEndpoint, ep).Warn("Checking version of etcd endpoint")
 			errors = true
 			continue
 		}
@@ -161,13 +160,16 @@ func (e *EtcdClient) CheckMinVersion(timeout time.Duration) error {
 			return fmt.Errorf("Minimal etcd version not met in %q,"+
 				" required: %s, found: %s", ep, minEVersion.String(), v.String())
 		}
-		log.Infof("Version of etcd endpoint %q: %s OK!", ep, v.String())
+		log.WithFields(log.Fields{
+			fieldEtcdEndpoint: ep,
+			"version":         v,
+		}).Info("Version of etcd endpoint OK")
 	}
 	if len(eps) == 0 {
-		log.Warningf("Minimal etcd version unknown: No etcd endpoints available!")
+		log.Warn("Minimal etcd version unknown: No etcd endpoints available")
 	} else if errors {
-		log.Warningf("Unable to check etcd's cluster version."+
-			" Please make sure the minimal etcd version running on all endpoints is %s", minEVersion.String())
+		log.WithField("version.min", minEVersion).Warn("Unable to check etcd's cluster version." +
+			" Please make sure the minimal etcd version is running on all endpoints")
 	}
 	return nil
 }
@@ -249,12 +251,12 @@ func (e *EtcdClient) GetMaxID(key string, firstID uint32) (uint32, error) {
 		case err != nil:
 			return 0, err
 		case value == nil:
-			if err := e.InitializeFreeID(key, firstID); err != nil {
+			if err = e.InitializeFreeID(key, firstID); err != nil {
 				return 0, err
 			}
 			attempts--
 		case err == nil:
-			if err := json.Unmarshal(value, &freeID); err != nil {
+			if err = json.Unmarshal(value, &freeID); err != nil {
 				return 0, err
 			}
 			return freeID, nil
@@ -278,9 +280,9 @@ func (e *EtcdClient) SetMaxID(key string, firstID, maxID uint32) error {
 		}
 		if k == nil {
 			// Something is really wrong
-			errMsg := "Unable to setting ID because the key is always empty\n"
-			log.Errorf(errMsg)
-			return fmt.Errorf(errMsg)
+			errMsg := "Unable to set ID because the key is always empty"
+			log.Error(errMsg)
+			return fmt.Errorf("%s\n", errMsg)
 		}
 	}
 	return e.SetValue(key, maxID)
@@ -324,7 +326,7 @@ func (e *EtcdClient) GASNewSecLabelID(basePath string, baseID uint32, pI *policy
 			return false, err
 		}
 		if consulLabels.RefCount() == 0 {
-			log.Infof("Recycling ID %d", *incID)
+			log.WithField(logfields.Identity, *incID).Info("Recycling ID")
 			return false, setID2Label(*incID)
 		}
 
@@ -387,7 +389,7 @@ func (e *EtcdClient) GASNewL3n4AddrID(basePath string, baseID uint32, lAddrID *t
 			return false, err
 		}
 		if consulL3n4AddrID.ID == 0 {
-			log.Infof("Recycling Service ID %d", *incID)
+			log.WithField(logfields.Identity, *incID).Info("Recycling Service ID")
 			return false, setIDtoL3n4Addr(*incID)
 		}
 
@@ -430,7 +432,7 @@ func (e *EtcdClient) Watch(w *Watcher, list bool) {
 				fieldRev:     lastRev,
 				fieldPrefix:  w.prefix,
 				fieldWatcher: w,
-			}).WithError(err).Warningf("unable to list keys before watching")
+			}).WithError(err).Warn("Unable to list keys before watching")
 			continue
 		}
 
@@ -472,7 +474,7 @@ func (e *EtcdClient) Watch(w *Watcher, list bool) {
 					log.WithFields(log.Fields{
 						fieldRev:     lastRev,
 						fieldWatcher: w,
-					}).WithError(err).Warningf("etcd watcher received error")
+					}).WithError(err).Warn("etcd watcher received error")
 					continue
 				}
 
@@ -507,7 +509,7 @@ func (e *EtcdClient) GetWatcher(key string, timeSleep time.Duration) <-chan []po
 		for {
 			w := <-e.cli.Watch(ctx.Background(), key, client.WithRev(lastRevision))
 			if w.Err() != nil {
-				log.Warning("Unable to watch key %s, retrying...", key)
+				log.WithField(fieldKey, key).Warn("Unable to watch key, retrying...")
 				time.Sleep(curSeconds)
 				if curSeconds < timeSleep {
 					curSeconds += time.Second
@@ -562,7 +564,7 @@ func (e *EtcdClient) Get(key string) ([]byte, error) {
 	if getR.Count == 0 {
 		return nil, nil
 	}
-	return []byte(getR.Kvs[0].Value), nil
+	return getR.Kvs[0].Value, nil
 }
 
 // GetPrefix returns the first key which matches the prefix
@@ -575,7 +577,7 @@ func (e *EtcdClient) GetPrefix(prefix string) ([]byte, error) {
 	if getR.Count == 0 {
 		return nil, nil
 	}
-	return []byte(getR.Kvs[0].Value), nil
+	return getR.Kvs[0].Value, nil
 }
 
 // Set sets value of key
@@ -633,7 +635,7 @@ func (e *EtcdClient) ListPrefix(prefix string) (KeyValuePairs, error) {
 
 	pairs := KeyValuePairs{}
 	for i := int64(0); i < getR.Count; i++ {
-		pairs[string(getR.Kvs[i].Key)] = []byte(getR.Kvs[i].Value)
+		pairs[string(getR.Kvs[i].Key)] = getR.Kvs[i].Value
 
 	}
 

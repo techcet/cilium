@@ -55,7 +55,7 @@ If multiple sources and / or destinations are provided, each source is tested wh
 
 		srcSlices := [][]string{}
 		dstSlices := [][]string{}
-		var srcSlice, dstSlice, dports []string
+		var srcSlice, dstSlice []string
 		var dPorts []*models.Port
 		var err error
 
@@ -84,7 +84,9 @@ If multiple sources and / or destinations are provided, each source is tested wh
 			}
 
 			dstSlices = append(dstSlices, dstSlice)
+		}
 
+		if len(dports) > 0 {
 			dPorts, err = parseL4PortsSlice(dports)
 			if err != nil {
 				Fatalf("Invalid destination port: %s", err)
@@ -168,7 +170,7 @@ If multiple sources and / or destinations are provided, each source is tested wh
 				} else if scr != nil && scr.Payload != nil {
 					fmt.Println("----------------------------------------------------------------")
 					fmt.Printf("%s\n", scr.Payload.Log)
-					fmt.Printf("Verdict: %s\n", scr.Payload.Verdict)
+					fmt.Printf("Final verdict: %s\n", strings.ToUpper(scr.Payload.Verdict))
 				}
 			}
 		}
@@ -233,9 +235,7 @@ func getSecIDFromK8s(podName string) (string, error) {
 	if err != nil {
 		Fatalf("Error while retrieving configuration: %s", err)
 	}
-	k8sEndpoint := resp.K8sEndpoint
-	k8sConfig := resp.K8sConfiguration
-	restConfig, err := k8s.CreateConfig(k8sEndpoint, k8sConfig)
+	restConfig, err := k8s.CreateConfigFromAgentResponse(resp)
 	if err != nil {
 		return "", fmt.Errorf("unable to create rest configuration: %s", err)
 	}
@@ -269,11 +269,11 @@ func parseL4PortsSlice(slice []string) ([]*models.Port, error) {
 		var protoStr string
 		switch len(vSplit) {
 		case 1:
-			protoStr = models.PortProtocolAny
+			protoStr = models.PortProtocolANY
 		case 2:
-			protoStr = strings.ToLower(vSplit[1])
+			protoStr = strings.ToUpper(vSplit[1])
 			switch protoStr {
-			case models.PortProtocolTCP, models.PortProtocolUDP, models.PortProtocolAny:
+			case models.PortProtocolTCP, models.PortProtocolUDP, models.PortProtocolANY:
 			default:
 				return nil, fmt.Errorf("invalid protocol %q", protoStr)
 			}

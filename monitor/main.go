@@ -21,18 +21,28 @@ import (
 
 	"github.com/cilium/cilium/common"
 	"github.com/cilium/cilium/daemon/defaults"
+	"github.com/cilium/cilium/pkg/apisocket"
+	"github.com/cilium/cilium/pkg/logfields"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 const targetName = "cilium-node-monitor"
 
 func main() {
+	scopedLog := log.WithField(logfields.Path, defaults.MonitorSockPath)
 	common.RequireRootPrivilege(targetName)
 	os.Remove(defaults.MonitorSockPath)
 	server, err := net.Listen("unix", defaults.MonitorSockPath)
 	if err != nil {
-		log.Fatal(err)
+		scopedLog.WithError(err).Fatal("Cannot listen on socket")
+	}
+
+	if os.Getuid() == 0 {
+		err := apisocket.SetDefaultPermissions(defaults.MonitorSockPath)
+		if err != nil {
+			scopedLog.WithError(err).Fatal("Cannot set default permissions on socket")
+		}
 	}
 
 	m := Monitor{}
@@ -43,7 +53,7 @@ func main() {
 		if v > 0 {
 			npages = v
 		} else {
-			log.Infof("strconv: %s", err)
+			log.WithError(err).Info("Cannot parse number of pages with strconv")
 		}
 	}
 	m.Run(npages)

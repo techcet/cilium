@@ -19,18 +19,19 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	. "github.com/cilium/cilium/api/v1/server/restapi/daemon"
+	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/kvstore"
+	"github.com/cilium/cilium/pkg/workloads/containerd"
 
 	"github.com/go-openapi/runtime/middleware"
-	ctx "golang.org/x/net/context"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sTypes "k8s.io/client-go/pkg/api/v1"
 )
 
-func (d *Daemon) getK8sStatus() *models.Status {
+func getK8sStatus() *models.Status {
 	var k8sStatus *models.Status
-	if d.conf.IsK8sEnabled() {
-		if v, err := d.k8sClient.CoreV1().ComponentStatuses().Get("controller-manager", metav1.GetOptions{}); err != nil {
+	if k8s.IsEnabled() {
+		if v, err := k8s.Client().CoreV1().ComponentStatuses().Get("controller-manager", metav1.GetOptions{}); err != nil {
 			k8sStatus = &models.Status{State: models.StatusStateFailure, Msg: err.Error()}
 		} else if len(v.Conditions) == 0 {
 			k8sStatus = &models.Status{
@@ -74,13 +75,9 @@ func (h *getHealthz) Handle(params GetHealthzParams) middleware.Responder {
 		sr.Kvstore = &models.Status{State: models.StatusStateOk, Msg: info}
 	}
 
-	if _, err := d.dockerClient.Info(ctx.Background()); err != nil {
-		sr.ContainerRuntime = &models.Status{State: models.StatusStateFailure, Msg: err.Error()}
-	} else {
-		sr.ContainerRuntime = &models.Status{State: models.StatusStateOk, Msg: ""}
-	}
+	sr.ContainerRuntime = containerd.Status()
 
-	sr.Kubernetes = d.getK8sStatus()
+	sr.Kubernetes = getK8sStatus()
 
 	if sr.Kvstore.State != models.StatusStateOk {
 		sr.Cilium = &models.Status{
@@ -92,7 +89,7 @@ func (h *getHealthz) Handle(params GetHealthzParams) middleware.Responder {
 			State: sr.ContainerRuntime.State,
 			Msg:   "Container runtime is not ready",
 		}
-	} else if d.conf.IsK8sEnabled() && sr.Kubernetes.State != models.StatusStateOk {
+	} else if k8s.IsEnabled() && sr.Kubernetes.State != models.StatusStateOk {
 		sr.Cilium = &models.Status{
 			State: sr.Kubernetes.State,
 			Msg:   "Kubernetes service is not ready",

@@ -17,7 +17,7 @@ package kvstore
 import (
 	"fmt"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 var (
@@ -40,7 +40,7 @@ func initClient() error {
 			return err
 		}
 
-		log.Infof("Using consul as key-value store")
+		log.Info("Using consul as key-value store")
 		clientInstance = c
 
 	case Etcd:
@@ -53,7 +53,7 @@ func initClient() error {
 			return err
 		}
 
-		log.Infof("Using etcd as key-value store")
+		log.Info("Using etcd as key-value store")
 		clientInstance = c
 
 	default:

@@ -6,6 +6,7 @@
 # Folders
 _obj
 _test
+tests/cilium-files
 
 # Architecture specific extensions/prefixes
 *.cgo1.go
@@ -36,3 +37,9 @@ daemon/bindata.go
 cilium/bash_autocomplete
 *.swo
 outgoing
+
+*cscope.files
+*cscope.out
+*cscope.in.out
+*cscope.po.out
+*tags

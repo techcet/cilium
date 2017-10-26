@@ -51,7 +51,7 @@ func listMap(cmd *cobra.Command, args []string) {
 	lbl := args[0]
 
 	if lbl != "" {
-		if id := policy.GetReservedID(lbl); id != policy.ID_UNKNOWN {
+		if id := policy.GetReservedID(lbl); id != policy.IdentityUnknown {
 			lbl = "reserved_" + strconv.FormatUint(uint64(id), 10)
 		}
 	} else {
@@ -84,7 +84,7 @@ func listMap(cmd *cobra.Command, args []string) {
 
 	for _, stat := range statsMap {
 		if !printIDs {
-			id := policy.NumericIdentity(stat.ID)
+			id := policy.NumericIdentity(stat.Key.Identity)
 			if lbls, err := client.IdentityGet(id.StringID()); err != nil {
 				fmt.Fprintf(os.Stderr, "Was impossible to retrieve label ID %d: %s\n",
 					id, err)
@@ -101,7 +101,7 @@ func listMap(cmd *cobra.Command, args []string) {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", labelsDesTitle, actionTitle, bytesTitle, packetsTitle)
 	}
 	for _, stat := range statsMap {
-		id := policy.NumericIdentity(stat.ID)
+		id := policy.NumericIdentity(stat.Key.Identity)
 		act := api.Decision(stat.Action)
 		if printIDs {
 			fmt.Fprintf(w, "%d\t%s\t%d\t%d\t\n", id, act.String(), stat.Bytes, stat.Packets)

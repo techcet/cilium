@@ -17,7 +17,8 @@ package nodeaddress
 import (
 	"os"
 
-	log "github.com/Sirupsen/logrus"
+	"github.com/cilium/cilium/pkg/logfields"
+	log "github.com/sirupsen/logrus"
 )
 
 var (
@@ -43,9 +44,9 @@ func GetName() string {
 
 func init() {
 	if h, err := os.Hostname(); err != nil {
-		log.Warningf("Unable to retrieve local hostname: %s", err)
+		log.WithError(err).Warn("Unable to retrieve local hostname")
 	} else {
-		log.Debugf("os.Hostname() returned: %s", h)
+		log.WithField(logfields.NodeName, h).Debug("os.Hostname() returned")
 		nodeName = h
 	}
 }

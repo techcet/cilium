@@ -23,9 +23,9 @@ contribute to Cilium:
 +==================================================================================+=======================+============================================================+
 | git                                                                              | latest                | N/A (OS-specific)                                          |
 +----------------------------------------------------------------------------------+-----------------------+------------------------------------------------------------+
-| `go <https://golang.org/dl/>`_                                                   | 1.8.3                 | N/A (OS-specific)                                          |
+| `go <https://golang.org/dl/>`_                                                   | 1.9                   | N/A (OS-specific)                                          |
 +----------------------------------------------------------------------------------+-----------------------+------------------------------------------------------------+
-| `go-swagger <https://github.com/go-swagger/go-swagger/tree/master/cmd/swagger>`_ | `fbc64c26`            | ``go get -u github.com/go-swagger/go-swagger/cmd/swagger`` |
+| `go-swagger <https://github.com/go-swagger/go-swagger/tree/master/cmd/swagger>`_ | 0.12.0                | ``go get -u github.com/go-swagger/go-swagger/cmd/swagger`` |
 +----------------------------------------------------------------------------------+-----------------------+------------------------------------------------------------+
 | `go-bindata <https://github.com/jteeuwen/go-bindata>`_                           | `a0ff2567cfb`         | ``go get -u github.com/jteeuwen/go-bindata/...``           |
 +----------------------------------------------------------------------------------+-----------------------+------------------------------------------------------------+
@@ -231,6 +231,68 @@ Whenever making changes to Cilium documentation you should check that you did no
 After this you can browse the updated docs as HTML starting at
 ``Documentation\_build\html\index.html``.
 
+Debugging datapath code
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. note::
+
+    See also the user troubleshooting guide in the section :ref:`admin_guide`.
+
+One of the most common issues when developing datapath code is that the BPF
+code cannot be loaded into the kernel. This frequently manifests as the
+endpoints appearing in the "not-ready" state and never switching out of it:
+
+.. code:: bash
+
+    $ cilium endpoint list
+    ENDPOINT   POLICY        IDENTITY   LABELS (source:key[=value])   IPv6                     IPv4            STATUS
+               ENFORCEMENT
+    48896      Disabled      266        container:id.server           fd02::c0a8:210b:0:bf00   10.11.13.37     not-ready
+    60670      Disabled      267        container:id.client           fd02::c0a8:210b:0:ecfe   10.11.167.158   not-ready
+
+Running ``cilium endpoint get`` for one of the endpoints will provide a
+description of known state about it, which includes BPF verification logs.
+
+The files under ``/var/run/cilium/state`` provide context about how the BPF
+datapath is managed and set up. The .log files will describe the BPF
+requirements and features that Cilium detected and used to generate the BPF
+programs. The .h files describe specific configurations used for BPF program
+compilation. The numbered directories describe endpoint-specific state,
+including header configuration files and BPF binaries.
+
+.. code:: bash
+
+    # for log in /var/run/cilium/state/*.log; do echo "cat $log"; cat $log; done
+    cat /var/run/cilium/state/bpf_features.log
+    BPF/probes: CONFIG_CGROUP_BPF=y is not in kernel configuration
+    BPF/probes: CONFIG_LWTUNNEL_BPF=y is not in kernel configuration
+    HAVE_LPM_MAP_TYPE: Your kernel doesn't support LPM trie maps for BPF, thus disabling CIDR policies. Recommendation is to run 4.11+ kernels.
+    HAVE_LRU_MAP_TYPE: Your kernel doesn't support LRU maps for BPF, thus switching back to using hash table for the cilium connection tracker. Recommendation is to run 4.10+ kernels.
+
+Current BPF map state for particular programs is held under ``/sys/fs/bpf/``,
+and the `bpf-map <https://github.com/cilium/bpf-map>`_ utility can be useful
+for debugging what is going on inside them, for example:
+
+.. code:: bash
+
+    # ls /sys/fs/bpf/tc/globals/
+    cilium_calls_15124  cilium_calls_48896        cilium_ct4_global       cilium_lb4_rr_seq       cilium_lb6_services  cilium_policy_25729  cilium_policy_60670       cilium_proxy6
+    cilium_calls_25729  cilium_calls_60670        cilium_ct6_global       cilium_lb4_services     cilium_lxc           cilium_policy_3978   cilium_policy_reserved_1  cilium_reserved_policy
+    cilium_calls_3978   cilium_calls_netdev_ns_1  cilium_events           cilium_lb6_reverse_nat  cilium_policy        cilium_policy_4314   cilium_policy_reserved_2  tunnel_endpoint_map
+    cilium_calls_4314   cilium_calls_overlay_2    cilium_lb4_reverse_nat  cilium_lb6_rr_seq       cilium_policy_15124  cilium_policy_48896  cilium_proxy4
+    # bpf-map info /sys/fs/bpf/tc/globals/cilium_policy_15124
+    Type:           Hash
+    Key size:       8
+    Value size:     24
+    Max entries:    1024
+    Flags:          0x0
+    # bpf-map dump /sys/fs/bpf/tc/globals/cilium_policy_15124
+    Key:
+    00000000  6a 01 00 00 82 23 06 00                           |j....#..|
+    Value:
+    00000000  01 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
+    00000010  00 00 00 00 00 00 00 00                           |........|
+
 Submitting a pull request
 -------------------------
 
@@ -249,6 +311,34 @@ requirements have been met:
   section for additional details.
 * You have signed off on your commits, see the section "Developer's
   Certificate of Origin" for more details.
+
+
+CI / Testing environment
+------------------------
+
+Logging into VM running tests
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+1. Log into the Jenkins slave running the test workload
+2. Identify the vagrant box running the specific test
+
+.. code:: bash
+
+    $ vagrant global-status
+    id       name                          provider   state   directory
+    -------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    6e68c6c  k8s1-build-PR-1588-6          virtualbox running /root/jenkins/workspace/cilium_cilium_PR-1588-CWL743UTZEF6CPEZCNXQVSZVEW32FR3CMGKGY6667CU7X43AAZ4Q/tests/k8s
+    ec5962a  cilium-master-build-PR-1588-6 virtualbox running /root/jenkins/workspace/cilium_cilium_PR-1588-CWL743UTZEF6CPEZCNXQVSZVEW32FR3CMGKGY6667CU7X43AAZ4Q
+    bfaffaa  k8s2-build-PR-1588-6          virtualbox running /root/jenkins/workspace/cilium_cilium_PR-1588-CWL743UTZEF6CPEZCNXQVSZVEW32FR3CMGKGY6667CU7X43AAZ4Q/tests/k8s
+    3fa346c  k8s1-build-PR-1588-7          virtualbox running /root/jenkins/workspace/cilium_cilium_PR-1588-CWL743UTZEF6CPEZCNXQVSZVEW32FR3CMGKGY6667CU7X43AAZ4Q@2/tests/k8s
+    b7ded3c  cilium-master-build-PR-1588-7 virtualbox running /root/jenkins/workspace/cilium_cilium_PR-1588-CWL743UTZEF6CPEZCNXQVSZVEW32FR3CMGKGY6667CU7X43AAZ4Q@2
+
+3. Log into the specific VM
+
+.. code:: bash
+
+    $ JOB_BASE_NAME=PR-1588 BUILD_NUMBER=6 vagrant ssh 6e68c6c
+
 
 Release Process
 ---------------

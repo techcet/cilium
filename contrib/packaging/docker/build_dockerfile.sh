@@ -27,7 +27,15 @@ export GOPATH=/tmp/cilium-net-build && \\
 export PATH="\$GOROOT/bin:/usr/local/clang+llvm/bin:\$GOPATH/bin:\$PATH" && \\
 make clean-container build && \\
 make PKG_BUILD=1 install && \\
+
+# bash-completion-begin
+mkdir -p /root && \\
+echo ". /etc/profile.d/bash_completion.sh" >> /root/.bashrc && \\
+cilium completion bash >> /root/.bashrc && \\
+# bash-completion-end
+
 groupadd -f cilium
+
 EOF
 }
 
@@ -35,13 +43,14 @@ function add_golang_install_cmd {
   cat <<EOF >> ./Dockerfile
 cd /tmp && \\
 curl -Sslk -o go.linux-amd64.tar.gz \\
-https://storage.googleapis.com/golang/go1.8.3.linux-amd64.tar.gz && \\
+https://storage.googleapis.com/golang/go1.9.linux-amd64.tar.gz && \\
 tar -C /usr/local -xzf go.linux-amd64.tar.gz && \\
 cd /tmp/cilium-net-build/src/github.com/cilium/cilium && \\
 export GOROOT=/usr/local/go && \\
 export GOPATH=/tmp/cilium-net-build && \\
 export PATH="\$GOROOT/bin:/usr/local/clang+llvm/bin:\$GOPATH/bin:\$PATH" && \\
-go get -u github.com/jteeuwen/go-bindata/...
+go get -u github.com/jteeuwen/go-bindata/... && go get -u github.com/google/gops && \\
+mv /tmp/cilium-net-build/bin/gops /usr/local/bin/
 EOF
 
 }
@@ -68,7 +77,6 @@ EOF
   append_docker_install_deps
   add_golang_install_cmd
   printf %s "$(< Dockerfile)" > Dockerfile
-  local OUTPUT=' && \\'
   echo "$(cat ./Dockerfile) && \\" > Dockerfile
   add_build_cilium_cmd
 
@@ -102,7 +110,7 @@ function append_docker_install_deps {
   cat <<EOF >> ./Dockerfile
 RUN apt-get update && \\
 
-apt-get install -y --no-install-recommends gcc make libelf-dev bison flex git ca-certificates libc6-dev.i386 iptables libgcc-5-dev binutils && \\
+apt-get install -y --no-install-recommends gcc make libelf-dev bison flex git ca-certificates libc6-dev.i386 iptables libgcc-5-dev binutils bash-completion && \\
 
 # clang-3.8.1-begin
 apt-get install -y --no-install-recommends curl xz-utils && \\

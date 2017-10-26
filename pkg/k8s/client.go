@@ -16,13 +16,15 @@
 package k8s
 
 import (
+	goerrors "errors"
 	"fmt"
 	"net"
 	"time"
 
+	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/nodeaddress"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -39,6 +41,17 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+)
+
+var (
+	// ErrNilNode is returned when the Kubernetes API server has returned a nil node
+	ErrNilNode = goerrors.New("API server returned nil node")
+
+	// crdGV is the GroupVersion used for CRDs
+	crdGV = schema.GroupVersion{
+		Group:   CustomResourceDefinitionGroup,
+		Version: CustomResourceDefinitionVersion,
+	}
 )
 
 const (
@@ -65,7 +78,13 @@ const (
 )
 
 // CreateConfig creates a rest.Config for a given endpoint using a kubeconfig file.
-func CreateConfig(endpoint, kubeCfgPath string) (*rest.Config, error) {
+func createConfig(endpoint, kubeCfgPath string) (*rest.Config, error) {
+	// If the endpoint and the kubeCfgPath are empty then we can try getting
+	// the rest.Config from the InClusterConfig
+	if endpoint == "" && kubeCfgPath == "" {
+		return rest.InClusterConfig()
+	}
+
 	if kubeCfgPath != "" {
 		return clientcmd.BuildConfigFromFlags("", kubeCfgPath)
 	}
@@ -74,6 +93,18 @@ func CreateConfig(endpoint, kubeCfgPath string) (*rest.Config, error) {
 	err := rest.SetKubernetesDefaults(config)
 
 	return config, err
+}
+
+// CreateConfigFromAgentResponse creates a client configuration from a
+// models.DaemonConfigurationResponse
+func CreateConfigFromAgentResponse(resp *models.DaemonConfigurationResponse) (*rest.Config, error) {
+	return createConfig(resp.K8sEndpoint, resp.K8sConfiguration)
+}
+
+// CreateConfig creates a client configuration based on the configured API
+// server and Kubeconfig path
+func CreateConfig() (*rest.Config, error) {
+	return createConfig(GetAPIServer(), GetKubeconfigPath())
 }
 
 // CreateClient creates a new client to access the Kubernetes API
@@ -94,11 +125,12 @@ func CreateClient(config *rest.Config) (*kubernetes.Clientset, error) {
 		}
 		select {
 		case <-timeout.C:
-			log.Errorf("Unable to contact kubernetes api-server: %s", err)
+			log.Errorf("Unable to contact kubernetes api-server %s: %s", config.Host, err)
 			close(stop)
 		default:
 		}
 	}, 5*time.Second, stop)
+	log.Infof("Connected to kubernetes api-server %s", config.Host)
 	return cs, nil
 }
 
@@ -152,15 +184,15 @@ func CreateThirdPartyResourcesDefinitions(cli kubernetes.Interface) error {
 // CreateCustomResourceDefinitions creates the CRD object in the kubernetes
 // cluster
 func CreateCustomResourceDefinitions(clientset apiextensionsclient.Interface) error {
-	cnpCRDName := CustomResourceDefinitionPluralName + "." + CustomResourceDefinitionGroup
+	cnpCRDName := CustomResourceDefinitionPluralName + "." + crdGV.Group
 
 	res := &apiextensionsv1beta1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: cnpCRDName,
 		},
 		Spec: apiextensionsv1beta1.CustomResourceDefinitionSpec{
-			Group:   CustomResourceDefinitionGroup,
-			Version: CustomResourceDefinitionVersion,
+			Group:   crdGV.Group,
+			Version: crdGV.Version,
 			Names: apiextensionsv1beta1.CustomResourceDefinitionNames{
 				Plural:     CustomResourceDefinitionPluralName,
 				Singular:   CustomResourceDefinitionSingularName,
@@ -211,15 +243,11 @@ func CreateCustomResourceDefinitions(clientset apiextensionsclient.Interface) er
 
 func addKnownTypesCRD(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(
-		schema.GroupVersion{
-			Group:   CustomResourceDefinitionGroup,
-			Version: CustomResourceDefinitionVersion,
-		},
+		crdGV,
 		&CiliumNetworkPolicy{},
 		&CiliumNetworkPolicyList{},
-		&metav1.ListOptions{},
-		&metav1.DeleteOptions{},
 	)
+	metav1.AddToGroupVersion(scheme, crdGV)
 
 	return nil
 }
@@ -235,22 +263,25 @@ type CNPCliInterface interface {
 	Delete(namespace, name string, options *metav1.DeleteOptions) error
 	Get(namespace, name string) (*CiliumNetworkPolicy, error)
 	List(namespace string) (*CiliumNetworkPolicyList, error)
+	ListAll() (*CiliumNetworkPolicyList, error)
 	NewListWatch() *cache.ListWatch
 }
 
 // CreateCRDClient creates a new k8s client for custom resource definition
-func CreateCRDClient(config *rest.Config) (CNPCliInterface, error) {
-	config.GroupVersion = &schema.GroupVersion{
-		Group:   CustomResourceDefinitionGroup,
-		Version: CustomResourceDefinitionVersion,
+func CreateCRDClient(cfg *rest.Config) (CNPCliInterface, error) {
+	schemeBuilder := runtime.NewSchemeBuilder(addKnownTypesCRD)
+	sch := runtime.NewScheme()
+	if err := schemeBuilder.AddToScheme(sch); err != nil {
+		return nil, err
 	}
+
+	config := *cfg
+	config.GroupVersion = &crdGV
 	config.APIPath = "/apis"
 	config.ContentType = runtime.ContentTypeJSON
-	config.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: api.Codecs}
-	schemeBuilder := runtime.NewSchemeBuilder(addKnownTypesCRD)
-	schemeBuilder.AddToScheme(api.Scheme)
+	config.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: serializer.NewCodecFactory(sch)}
 
-	rc, err := rest.RESTClientFor(config)
+	rc, err := rest.RESTClientFor(&config)
 	return &cnpClient{rc}, err
 }
 
@@ -302,6 +333,15 @@ func (c *cnpClient) List(namespace string) (*CiliumNetworkPolicyList, error) {
 	return &result, err
 }
 
+// ListAll returns the list of CNPs in all the namespaces
+func (c *cnpClient) ListAll() (*CiliumNetworkPolicyList, error) {
+	var result CiliumNetworkPolicyList
+	err := c.RESTClient.Get().
+		Resource(CustomResourceDefinitionPluralName).
+		Do().Into(&result)
+	return &result, err
+}
+
 // NewListWatch returns a ListWatch for cilium CRD on all namespaces.
 func (c *cnpClient) NewListWatch() *cache.ListWatch {
 	return cache.NewListWatchFromClient(c.RESTClient,
@@ -341,38 +381,69 @@ func CreateTPRClient(config *rest.Config) (CNPCliInterface, error) {
 	return &cnpClient{rc}, err
 }
 
+func updateNodeAnnotation(c kubernetes.Interface, node *v1.Node, v4CIDR, v6CIDR *net.IPNet) (*v1.Node, error) {
+	if node.Annotations == nil {
+		node.Annotations = map[string]string{}
+	}
+
+	if v4CIDR != nil {
+		node.Annotations[Annotationv4CIDRName] = v4CIDR.String()
+	}
+
+	if v6CIDR != nil {
+		node.Annotations[Annotationv6CIDRName] = v6CIDR.String()
+	}
+
+	node, err := c.CoreV1().Nodes().Update(node)
+	if err != nil {
+		return nil, err
+	}
+
+	if node == nil {
+		return nil, ErrNilNode
+	}
+
+	return node, nil
+}
+
 // AnnotateNodeCIDR writes both v4 and v6 CIDRs in the given k8s node name.
 // In case of failure while updating the node, this function while spawn a go
 // routine to retry the node update indefinitely.
 func AnnotateNodeCIDR(c kubernetes.Interface, nodeName string, v4CIDR, v6CIDR *net.IPNet) error {
-	k8sNode, err := c.CoreV1().Nodes().Get(nodeName, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	// register IP CIDRs in node's annotations
-	log.Debugf("k8s: Storing IPv4 CIDR %s in k8s node %s's annotations", v4CIDR, k8sNode.Name)
-	log.Debugf("k8s: Storing IPv6 CIDR %s in k8s node %s's annotations", v6CIDR, k8sNode.Name)
-	k8sNode.Annotations[Annotationv4CIDRName] = v4CIDR.String()
-	k8sNode.Annotations[Annotationv6CIDRName] = v6CIDR.String()
+	log.WithFields(log.Fields{
+		fieldNodeName: nodeName,
+		fieldSubsys:   subsysKubernetes,
+	}).Debugf("Updating node annotations with node CIDRs: IPv4=%s IPv6=%s", v4CIDR, v6CIDR)
 
-	_, err = c.CoreV1().Nodes().Update(k8sNode)
-	if err != nil {
-		go func(c kubernetes.Interface, k8sServerNode *v1.Node, v4CIDR, v6CIDR *net.IPNet, err error) {
-			// TODO: Retry forever?
-			for n := 0; err != nil; {
-				log.Errorf("k8s: unable to update node %s with IPv6 CIDR annotation: %s, retrying...", k8sServerNode.Name, err)
-				// In case of an error let's retry until
-				// we were able to set the annotations properly
-				k8sServerNode.Annotations[Annotationv4CIDRName] = v4CIDR.String()
-				k8sServerNode.Annotations[Annotationv6CIDRName] = v6CIDR.String()
-				k8sServerNode, err = c.CoreV1().Nodes().Update(k8sNode)
-				if n < 30 {
-					n++
+	go func(c kubernetes.Interface, nodeName string, v4CIDR, v6CIDR *net.IPNet) {
+		var node *v1.Node
+		var err error
+
+		for n := 1; n <= maxUpdateRetries; n++ {
+			node, err = GetNode(c, nodeName)
+			if err == nil {
+				node, err = updateNodeAnnotation(c, node, v4CIDR, v6CIDR)
+			} else {
+				if errors.IsNotFound(err) {
+					err = ErrNilNode
 				}
-				time.Sleep(time.Duration(n) * time.Second)
 			}
-		}(c, k8sNode, v4CIDR, v6CIDR, err)
-	}
+
+			if err != nil {
+				log.WithFields(log.Fields{
+					fieldRetry:    n,
+					fieldMaxRetry: maxUpdateRetries,
+					fieldNodeName: nodeName,
+					fieldSubsys:   subsysKubernetes,
+				}).WithError(err).Error("Unable to update node resource with CIDR annotation")
+			} else {
+				break
+			}
+
+			time.Sleep(time.Duration(n) * time.Second)
+		}
+	}(c, nodeName, v4CIDR, v6CIDR)
+
 	return nil
 }
 
@@ -429,4 +500,29 @@ func UpdateCNPStatus(cnpClient CNPCliInterface, timeout time.Duration,
 			log.Warningf("k8s: unable to update CNP %s/%s with status: %s, retrying...", ns, name, err)
 		}
 	}
+}
+
+var (
+	client kubernetes.Interface
+)
+
+// Client returns the default Kubernetes client
+func Client() kubernetes.Interface {
+	return client
+}
+
+func createDefaultClient() error {
+	restConfig, err := CreateConfig()
+	if err != nil {
+		return fmt.Errorf("unable to create k8s client rest configuration: %s", err)
+	}
+
+	k8sClient, err := CreateClient(restConfig)
+	if err != nil {
+		return fmt.Errorf("unable to create k8s client: %s", err)
+	}
+
+	client = k8sClient
+
+	return nil
 }

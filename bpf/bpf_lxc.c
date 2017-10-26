@@ -43,6 +43,7 @@
 #include "lib/lb.h"
 #include "lib/drop.h"
 #include "lib/dbg.h"
+#include "lib/trace.h"
 #include "lib/csum.h"
 #include "lib/conntrack.h"
 #include "lib/encap.h"
@@ -117,7 +118,7 @@ static inline int ipv6_l3_from_lxc(struct __sk_buff *skb,
 {
 	union macaddr router_mac = NODE_MAC;
 	union v6addr host_ip = {}, router_ip = {};
-	int ret, l4_off;
+	int ret, l4_off, forwarding_reason;
 	struct csum_offset csum_off = {};
 	struct endpoint_info *ep;
 	struct lb6_service *svc;
@@ -204,6 +205,8 @@ skip_service_lookup:
 	if (ret < 0)
 		return ret;
 
+	forwarding_reason = ret;
+
 	switch (ret) {
 	case CT_NEW:
 		/* New connection implies that rev_nat_index remains untouched
@@ -244,28 +247,21 @@ skip_service_lookup:
 
 	if (ct_state.proxy_port) {
 		union macaddr host_mac = HOST_IFINDEX_MAC;
-		int ret;
 
 		ret = ipv6_redirect_to_host_port(skb, &csum_off, l4_off,
 						 ct_state.proxy_port, tuple->dport,
-						 orig_dip, tuple, &host_ip, SECLABEL);
+						 orig_dip, tuple, &host_ip, SECLABEL,
+						 forwarding_reason);
 		if (IS_ERR(ret))
 			return ret;
 
-		/* After L4 write in port mapping: revalidate for direct packet access */
-		data = (void *) (long) skb->data;
-		data_end = (void *) (long) skb->data_end;
-		ip6 = data + ETH_HLEN;
-		if (data + sizeof(*ip6) + ETH_HLEN > data_end)
-			return DROP_INVALID;
-
-		cilium_trace(skb, DBG_TO_HOST, skb->cb[CB_POLICY], 0);
+		cilium_dbg(skb, DBG_TO_HOST, skb->cb[CB_POLICY], 0);
 
 		ret = ipv6_l3(skb, l3_off, (__u8 *) &router_mac.addr, (__u8 *) &host_mac.addr);
 		if (ret != TC_ACT_OK)
 			return ret;
 
-		cilium_trace_capture(skb, DBG_CAPTURE_DELIVERY, HOST_IFINDEX);
+		cilium_dbg_capture(skb, DBG_CAPTURE_DELIVERY, HOST_IFINDEX);
 		return redirect(HOST_IFINDEX, 0);
 	}
 
@@ -359,16 +355,16 @@ skip_service_lookup:
 to_host:
 	if (1) {
 		union macaddr host_mac = HOST_IFINDEX_MAC;
-		int ret;
 
-		cilium_trace(skb, DBG_TO_HOST, is_policy_skip(skb), 0);
+		cilium_dbg(skb, DBG_TO_HOST, is_policy_skip(skb), 0);
 
 		ret = ipv6_l3(skb, l3_off, (__u8 *) &router_mac.addr, (__u8 *) &host_mac.addr);
 		if (ret != TC_ACT_OK)
 			return ret;
 
 #ifndef POLICY_ENFORCEMENT
-		cilium_trace_capture(skb, DBG_CAPTURE_DELIVERY, HOST_IFINDEX);
+		send_trace_notify(skb, TRACE_TO_HOST, SECLABEL, 0, 0, HOST_IFINDEX,
+				  forwarding_reason);
 		return redirect(HOST_IFINDEX, 0);
 #else
 		skb->cb[CB_SRC_LABEL] = SECLABEL;
@@ -384,7 +380,7 @@ to_host:
 	}
 
 pass_to_stack:
-	cilium_trace(skb, DBG_TO_STACK, is_policy_skip(skb), 0);
+	cilium_dbg(skb, DBG_TO_STACK, is_policy_skip(skb), 0);
 
 	ret = ipv6_l3(skb, l3_off, NULL, (__u8 *) &router_mac.addr);
 	if (unlikely(ret != TC_ACT_OK))
@@ -395,7 +391,8 @@ pass_to_stack:
 
 #ifndef POLICY_ENFORCEMENT
 	/* No policy, pass directly down to stack */
-	cilium_trace_capture(skb, DBG_CAPTURE_DELIVERY, 0);
+	send_trace_notify(skb, TRACE_TO_STACK, SECLABEL, 0, 0, 0,
+			  forwarding_reason);
 	return TC_ACT_OK;
 #else
 	skb->cb[CB_SRC_LABEL] = SECLABEL;
@@ -447,7 +444,7 @@ static inline int handle_ipv4(struct __sk_buff *skb)
 	void *data_end = (void *) (long) skb->data_end;
 	struct iphdr *ip4 = data + ETH_HLEN;
 	struct ethhdr *eth = data;
-	int ret, l3_off = ETH_HLEN, l4_off;
+	int ret, l3_off = ETH_HLEN, l4_off, forwarding_reason;
 	struct csum_offset csum_off = {};
 	struct endpoint_info *ep;
 	struct lb4_service *svc;
@@ -529,6 +526,8 @@ skip_service_lookup:
 	if (ret < 0)
 		return ret;
 
+	forwarding_reason = ret;
+
 	switch (ret) {
 	case CT_NEW:
 		/* New connection implies that rev_nat_index remains untouched
@@ -566,11 +565,10 @@ skip_service_lookup:
 
 	if (ct_state.proxy_port) {
 		union macaddr host_mac = HOST_IFINDEX_MAC;
-		int ret;
 
 		ret = ipv4_redirect_to_host_port(skb, &csum_off, l4_off,
 						 ct_state.proxy_port, tuple.dport,
-						 orig_dip, &tuple, SECLABEL);
+						 orig_dip, &tuple, SECLABEL, forwarding_reason);
 		if (IS_ERR(ret))
 			return ret;
 
@@ -581,13 +579,13 @@ skip_service_lookup:
 		if (data + sizeof(*ip4) + ETH_HLEN > data_end)
 			return DROP_INVALID;
 
-		cilium_trace(skb, DBG_TO_HOST, skb->cb[CB_POLICY], 0);
+		cilium_dbg(skb, DBG_TO_HOST, skb->cb[CB_POLICY], 0);
 
 		ret = ipv4_l3(skb, l3_off, (__u8 *) &router_mac.addr, (__u8 *) &host_mac.addr, ip4);
 		if (ret != TC_ACT_OK)
 			return ret;
 
-		cilium_trace_capture(skb, DBG_CAPTURE_DELIVERY, HOST_IFINDEX);
+		cilium_dbg_capture(skb, DBG_CAPTURE_DELIVERY, HOST_IFINDEX);
 		return redirect(HOST_IFINDEX, 0);
 	}
 
@@ -668,16 +666,16 @@ skip_service_lookup:
 to_host:
 	if (1) {
 		union macaddr host_mac = HOST_IFINDEX_MAC;
-		int ret;
 
-		cilium_trace(skb, DBG_TO_HOST, is_policy_skip(skb), 0);
+		cilium_dbg(skb, DBG_TO_HOST, is_policy_skip(skb), 0);
 
 		ret = ipv4_l3(skb, l3_off, (__u8 *) &router_mac.addr, (__u8 *) &host_mac.addr, ip4);
 		if (ret != TC_ACT_OK)
 			return ret;
 
 #ifndef POLICY_ENFORCEMENT
-		cilium_trace_capture(skb, DBG_CAPTURE_DELIVERY, HOST_IFINDEX);
+		send_trace_notify(skb, TRACE_TO_HOST, SECLABEL, 0, 0, HOST_IFINDEX,
+				  forwarding_reason);
 		return redirect(HOST_IFINDEX, 0);
 #else
 		skb->cb[CB_SRC_LABEL] = SECLABEL;
@@ -693,7 +691,7 @@ to_host:
 	}
 
 pass_to_stack:
-	cilium_trace(skb, DBG_TO_STACK, is_policy_skip(skb), 0);
+	cilium_dbg(skb, DBG_TO_STACK, is_policy_skip(skb), 0);
 
 	ret = ipv4_l3(skb, l3_off, NULL, (__u8 *) &router_mac.addr, ip4);
 	if (unlikely(ret != TC_ACT_OK))
@@ -706,7 +704,8 @@ pass_to_stack:
 
 #ifndef POLICY_ENFORCEMENT
 	/* No policy, pass directly down to stack */
-	cilium_trace_capture(skb, DBG_CAPTURE_DELIVERY, 0);
+	send_trace_notify(skb, TRACE_TO_STACK, SECLABEL, 0, 0, 0,
+			  forwarding_reason);
 	return TC_ACT_OK;
 #else
 	skb->cb[CB_SRC_LABEL] = SECLABEL;
@@ -746,7 +745,7 @@ int handle_ingress(struct __sk_buff *skb)
 
 	bpf_clear_cb(skb);
 
-	cilium_trace_capture2(skb, DBG_CAPTURE_FROM_LXC, skb->ingress_ifindex, SECLABEL);
+	cilium_dbg_capture2(skb, DBG_CAPTURE_FROM_LXC, skb->ingress_ifindex, SECLABEL);
 
 #ifdef DROP_ALL
 	if (skb->protocol == bpf_htons(ETH_P_ARP)) {
@@ -788,13 +787,14 @@ int handle_ingress(struct __sk_buff *skb)
 
 struct bpf_elf_map __section_maps POLICY_MAP = {
 	.type		= BPF_MAP_TYPE_HASH,
-	.size_key	= sizeof(__u32),
+	.size_key	= sizeof(struct policy_key),
 	.size_value	= sizeof(struct policy_entry),
 	.pinning	= PIN_GLOBAL_NS,
 	.max_elem	= 1024,
 };
 
-static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u32 src_label)
+static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u32 src_label,
+					 int *forwarding_reason)
 {
 	struct ipv6_ct_tuple tuple = {};
 	void *data = (void *) (long) skb->data;
@@ -848,6 +848,8 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 	if (ret < 0)
 		return ret;
 
+	*forwarding_reason = ret;
+
 	if (unlikely(ct_state.rev_nat_index)) {
 		int ret2;
 
@@ -861,7 +863,9 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 	 * passed through the allowed consumer. */
 	/* FIXME: Add option to disable policy accounting and avoid policy
 	 * lookup if policy accounting is disabled */
-	verdict = policy_can_access(&POLICY_MAP, skb, src_label, sizeof(tuple.saddr), &tuple.saddr);
+	verdict = policy_can_access(&POLICY_MAP, skb, src_label, tuple.dport,
+				    tuple.nexthdr, sizeof(tuple.saddr),
+				    &tuple.saddr);
 	if (unlikely(ret == CT_NEW)) {
 		if (verdict != TC_ACT_OK)
 			return DROP_POLICY;
@@ -885,7 +889,8 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 
 		ret = ipv6_redirect_to_host_port(skb, &csum_off, l4_off,
 						 ct_state.proxy_port, tuple.dport,
-						 orig_dip, &tuple, &host_ip, src_label);
+						 orig_dip, &tuple, &host_ip, src_label,
+						 *forwarding_reason);
 		if (IS_ERR(ret))
 			return ret;
 
@@ -902,7 +907,8 @@ static inline int __inline__ ipv6_policy(struct __sk_buff *skb, int ifindex, __u
 }
 
 #ifdef LXC_IPV4
-static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u32 src_label)
+static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u32 src_label,
+					 int *forwarding_reason)
 {
 	struct ipv4_ct_tuple tuple = {};
 	void *data = (void *) (long) skb->data;
@@ -936,6 +942,8 @@ static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u
 	if (ret < 0)
 		return ret;
 
+	*forwarding_reason = ret;
+
 #ifdef LXC_NAT46
 	if (skb->cb[CB_NAT46_STATE] == NAT46) {
 		ep_tail_call(skb, CILIUM_CALL_NAT46);
@@ -957,7 +965,9 @@ static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u
 
 	/* Policy lookup is done on every packet to account for packets that
 	 * passed through the allowed consumer. */
-	verdict = policy_can_access(&POLICY_MAP, skb, src_label, sizeof(tuple.saddr), &tuple.saddr);
+	verdict = policy_can_access(&POLICY_MAP, skb, src_label, tuple.dport,
+				    tuple.nexthdr, sizeof(tuple.saddr),
+				    &tuple.saddr);
 	if (unlikely(ret == CT_NEW)) {
 		if (verdict != TC_ACT_OK)
 			return DROP_POLICY;
@@ -980,11 +990,11 @@ static inline int __inline__ ipv4_policy(struct __sk_buff *skb, int ifindex, __u
 
 		ret = ipv4_redirect_to_host_port(skb, &csum_off, l4_off,
 						 ct_state.proxy_port, tuple.dport,
-						 orig_dip, &tuple, src_label);
+						 orig_dip, &tuple, src_label, *forwarding_reason);
 		if (IS_ERR(ret))
 			return ret;
 
-		cilium_trace(skb, DBG_TO_HOST, is_policy_skip(skb), 0);
+		cilium_dbg(skb, DBG_TO_HOST, is_policy_skip(skb), 0);
 
 		if (eth_store_saddr(skb, (__u8 *) &router_mac.addr, 0) < 0)
 			return DROP_WRITE_ERROR;
@@ -1003,15 +1013,16 @@ __section_tail(CILIUM_MAP_POLICY, LXC_ID) int handle_policy(struct __sk_buff *sk
 {
 	int ret, ifindex = skb->cb[CB_IFINDEX];
 	__u32 src_label = skb->cb[CB_SRC_LABEL];
+	int forwarding_reason = 0;
 
 	switch (skb->protocol) {
 	case bpf_htons(ETH_P_IPV6):
-		ret = ipv6_policy(skb, ifindex, src_label);
+		ret = ipv6_policy(skb, ifindex, src_label, &forwarding_reason);
 		break;
 
 #ifdef LXC_IPV4
 	case bpf_htons(ETH_P_IP):
-		ret = ipv4_policy(skb, ifindex, src_label);
+		ret = ipv4_policy(skb, ifindex, src_label, &forwarding_reason);
 		break;
 #endif
 
@@ -1024,9 +1035,12 @@ __section_tail(CILIUM_MAP_POLICY, LXC_ID) int handle_policy(struct __sk_buff *sk
 		return send_drop_notify(skb, src_label, SECLABEL, LXC_ID,
 					ifindex, ret, TC_ACT_SHOT);
 
-	ifindex = skb->cb[CB_IFINDEX];
+	if (ifindex == skb->cb[CB_IFINDEX]) { // Not redirected to host / proxy.
+		send_trace_notify(skb, TRACE_TO_LXC, src_label, SECLABEL, LXC_ID, ifindex,
+				  forwarding_reason);
+	}
 
-	cilium_trace_capture(skb, DBG_CAPTURE_DELIVERY, ifindex);
+	ifindex = skb->cb[CB_IFINDEX];
 
 	if (ifindex)
 		return redirect(ifindex, 0);
@@ -1041,7 +1055,7 @@ __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_NAT64) int tail_ipv6_to_ipv4(struct
 	if (IS_ERR(ret))
 		return ret;
 
-	cilium_trace_capture(skb, DBG_CAPTURE_AFTER_V64, skb->ingress_ifindex);
+	cilium_dbg_capture(skb, DBG_CAPTURE_AFTER_V64, skb->ingress_ifindex);
 
 	skb->cb[CB_NAT46_STATE] = NAT64;
 
@@ -1065,7 +1079,7 @@ __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_NAT46) int tail_ipv4_to_ipv6(struct
 	if (IS_ERR(ret))
 		return ret;
 
-	cilium_trace_capture(skb, DBG_CAPTURE_AFTER_V46, skb->ingress_ifindex);
+	cilium_dbg_capture(skb, DBG_CAPTURE_AFTER_V46, skb->ingress_ifindex);
 
 	tail_call(skb, &cilium_policy, LXC_ID);
 	return DROP_MISSED_TAIL_CALL;

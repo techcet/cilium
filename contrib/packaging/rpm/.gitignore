@@ -1,2 +1,4 @@
 cilium*
-x86_64
+version*
+output
+env

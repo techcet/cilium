@@ -45,16 +45,14 @@ const (
 
 	// PathDelimiter is the delimiter used in the labels paths.
 	PathDelimiter = "."
-	// GroupFilePath is the unix group file path.
-	GroupFilePath = "/etc/group"
-	// CiliumGroupName is the cilium's unix group name.
-	CiliumGroupName = "cilium"
 
 	// CHeaderFileName is the name of the C header file for BPF programs for a
 	// particular endpoint.
 	CHeaderFileName = "lxc_config.h"
 	// NetdevHeaderFileName is the name of the header file used for bpf_netdev.c and bpf_overlay.c.
 	NetdevHeaderFileName = "netdev_config.h"
+	// PreFilterHeaderFileName is the name of the header file used for bpf_xdp.c.
+	PreFilterHeaderFileName = "filter_config.h"
 	// CiliumCHeaderPrefix is the prefix using when printing/writing an endpoint in a
 	// base64 form.
 	CiliumCHeaderPrefix = "CILIUM_BASE64_"

@@ -99,7 +99,7 @@ description
 
 Layer 3: Labels-Based
 =====================
-
+/
 The L3 policy specifies which endpoints can talk to each other. L3 policies can
 be specified using :ref:`labels` or CIDR. For CIDR, refer to the
 :ref:`policy_cidr` section below.
@@ -188,6 +188,19 @@ the label ``env=prod`` in order for access to be granted::
 
 .. _policy_cidr:
 
+Layer 3: Entities
+~~~~~~~~~~~~~~~~~
+
+There is an additional syntactic sugar for explicitly whitelisting ``world`` and ``host`` entities::
+
+        [{
+            "endpointSelector": {"matchLabels": {"env":"prod"}},
+            "ingress": [{
+                "fromEntities": ["world"]
+            }]
+        }]
+
+
 Layer 3: IP/CIDR based
 ======================
 
@@ -199,12 +212,14 @@ services, for example to limit external access to a particular IP range.
 
 CIDR policies can be applied at ingress and egress:
 
-:: 
+::
 
         type IngressRule struct {
                 // FromCIDR is a list of IP blocks which the endpoint subject to the
                 // rule is allowed to receive connections from in addition to FromEndpoints.
-                // This will match on the source IP address of incoming connections.
+                // This will match on the source IP address of incoming connections. Adding
+                // a prefix into FromCIDR or into FromCIDRSet with no ExcludeCIDRs is
+                // equivalent. Overlaps are allowed between FromCIDR and FromCIDRSet.
                 //
                 // Example:
                 // Any endpoint with the label "app=my-legacy-pet" is allowed to receive
@@ -212,7 +227,21 @@ CIDR policies can be applied at ingress and egress:
                 //
                 // +optional
                 FromCIDR []CIDR `json:"fromCIDR,omitempty"`
-
+                
+                // FromCIDRSet is a list of IP blocks which the endpoint subject to the
+                // rule is allowed to receive connections from in addition to FromEndpoints,
+                // along with a list of subnets contained within their corresponding IP block
+                // from which traffic should not be allowed.
+                // This will match on the source IP address of incoming connections. Adding
+                // a prefix into FromCIDR or into FromCIDRSet with no ExcludeCIDRs is
+                // equivalent. Overlaps are allowed between FromCIDR and FromCIDRSet.
+                //
+                // Example:
+                // Any endpoint with the label "app=my-legacy-pet" is allowed to receive
+                // connections from 10.0.0.0/8 except from IPs in subnet 10.96.0.0/12.
+                //
+                // +optional
+                FromCIDRSet []CIDRRule `json:"fromCIDRSet,omitempty"
                 // [...]
         }
 
@@ -220,7 +249,9 @@ CIDR policies can be applied at ingress and egress:
                 // ToCIDR is a list of IP blocks which the endpoint subject to the rule
                 // is allowed to initiate connections to in addition to connections
                 // which are allowed via FromEndpoints. This will match on the
-                // destination IP address of outgoing connections.
+                // destination IP address of outgoing connections. Adding a prefix into
+                // ToCIDR or into ToCIDRSet with no ExcludeCIDRs is equivalent. Overlaps
+                // are allowed between ToCIDR and ToCIDRSet.
                 //
                 // Example:
                 // Any endpoint with the label "app=database-proxy" is allowed to
@@ -228,17 +259,40 @@ CIDR policies can be applied at ingress and egress:
                 //
                 // +optional
                 ToCIDR []CIDR `json:"toCIDR,omitempty"`
-
+                
+                // ToCIDRSet is a list of IP blocks which the endpoint subject to the rule
+                // is allowed to initiate connections to in addition to connections
+                // which are allowed via FromEndpoints, along with a list of subnets contained
+                // within their corresponding IP block to which traffic should not be
+                // allowed. This will match on the destination IP address of outgoing
+                // connections. Adding a prefix into ToCIDR or into ToCIDRSet with no
+                // ExcludeCIDRs is equivalent. Overlaps are allowed between ToCIDR and
+                // ToCIDRSet.
+                //
+                // Example:
+                // Any endpoint with the label "app=database-proxy" is allowed to
+                // initiate connections to 10.2.3.0/24 except from IPs in subnet 10.2.3.0/28.
+                //
+                // +optional
+                ToCIDRSet []CIDRRule `json:"toCIDRSet,omitempty"`
                 // [...]
         }
 
 
 fromCIDR
-  List of source prefixes/CIDRs that are allowed to talk to all endpoint
+  List of source prefixes/CIDRs that are allowed to talk to all endpoints
   selected by the ``endpointSelector``. Note that this list is **in addition**
   to the ``fromEndpoints`` specified. It is not required to allow the IPs of
   endpoints if the endpoints are already allowed to communicate based on
   ``fromEndpoints`` rules.
+
+fromCIDRSet
+  List of source prefixes/CIDRs that are allowed to talk to all endpoints
+  selected by the ``endpointSelector``, along with an optional list of
+  prefixes/CIDRs per source prefix/CIDR that are subnets of the source
+  prefix/CIDR from which communication is not allowed. Like ``fromCIDR``
+  it is not required to list the IPs of endpoints if the endpoints are
+  already allowed to communicate based on ``fromEndpoints`` rules.
 
 toCIDR:
   List of destination prefixes/CIDRs that endpoints selected by
@@ -247,11 +301,20 @@ toCIDR:
   respective destination endpoints. It is not required to list the IP of
   destination endpoints.
 
+toCIDRSet
+  List of destination prefixes/CIDRs that are allowed to talk to all endpoints
+  selected by the ``endpointSelector``, along with an optional list of
+  prefixes/CIDRs per source prefix/CIDR that are subnets of the destination
+  prefix/CIDR to which communication is not allowed. Like toCIDR, it is not
+  required to list the IPs of destination endpoints if they are already
+  selected by a ``fromEndpoints``.
+
 Example
 -------
 
 This example shows how to allow all endpoints with the label ``app=myService``
-to talk to the external IP ``20.1.1.1``
+to talk to the external IP ``20.1.1.1``, as well as the CIDR prefix ``10.0.0.0/8``,
+but not CIDR prefix ``10.96.0.0/12``
 
 ::
 
@@ -260,6 +323,12 @@ to talk to the external IP ``20.1.1.1``
             "egress": [{
                 "toCIDR": [
                     "20.1.1.1/32"
+                ],
+                "toCIDRSet": [{
+                    "cidr": "10.0.0.0/8",
+                    "except": [
+                        "10.96.0.0/12"
+                    ]}
                 ]
             }]
         }]
@@ -318,7 +387,7 @@ The ``toPorts`` field takes a ``PortProtocol`` structure which is defined as fol
                 Port string `json:"port"`
 
                 // Protocol is the L4 protocol. If omitted or empty, any protocol
-                // matches. Accepted values: "tcp", "udp", ""/"any"
+                // matches. Accepted values: "TCP", "UDP", ""/"ANY"
                 //
                 // Matching on ICMP is not supported.
                 //
@@ -335,15 +404,55 @@ Example (L4)
 The following rule limits all endpoints with the label ``app=myService`` to
 only be able to emit packets using TCP on port 80::
 
-        {
+        [{
             "endpointSelector": {"matchLabels":{"app":"myService"}},
             "egress": [{
                 "toPorts": [
-                    {"port": "80", "protocol": "tcp"}
+                    {"ports":[ {"port": "80", "protocol": "TCP"}]}
                 ]
             }]
-        }
+        }]
 
+Example (Combining Labels + L4)
+-------------------------------
+
+This example enables all endpoints with the label ``role=frontend`` to
+communicate with all endpoints with the label ``role=backend``, but they must
+communicate using using TCP on port 80::
+
+        [{
+            "endpointSelector": {"matchLabels":{"role":"backend"}},
+            "ingress": [{
+                "fromEndpoints": [
+                  {"matchLabels":{"role":"frontend"}}
+                ],
+                "toPorts": [
+                    {"ports":[ {"port": "80", "protocol": "TCP"}]}
+                ]
+            }]
+        }]
+
+Example (Multiple Rules with Labels, L4)
+----------------------------------------
+
+This example is similar to the previous, but rather than restricting
+communication to only endpoints communicating over TCP on port 80 from
+``role=frontend``, it allows all traffic from endpoints with the label
+``role=frontend`` to reach ``role=backend``, *as well as* traffic from any
+endpoint that is communicating over TCP on port 80::
+
+        [{
+            "endpointSelector": {"matchLabels":{"role":"backend"}},
+            "ingress": [{
+                "fromEndpoints": [
+                  {"matchLabels":{"role":"frontend"}}
+                ]
+              }, {
+                "toPorts": [
+                    {"ports":[ {"port": "80", "protocol": "TCP"}]}
+                ]
+            }]
+        }]
 
 Layer 7 - HTTP
 ==============
@@ -450,12 +559,12 @@ While communicating on this port, the only API endpoints allowed will be ``GET
 
 ::
 
-        {
+        [{
             "endpointSelector": {"matchLabels":{"app":"myService"}},
             "ingress": [{
                 "toPorts": [{
                     "ports": [
-                        {"port": "80", "protocol": "tcp"}
+                        {"port": "80", "protocol": "TCP"}
                     ],
                     "rules": {
                         "HTTP": [
@@ -471,7 +580,7 @@ While communicating on this port, the only API endpoints allowed will be ``GET
                     }
                 }]
             }]
-        }
+        }]
 
 .. _policy_tracing:
 
@@ -525,6 +634,121 @@ and may not be applied independently.
 The ``Spec`` respectively ``Specs`` field refers to a standard Cilium Policy
 Rule.
 
+Example (Single Rule)
+---------------------
+
+The following example allows all prod-labeled pods to access ``/public`` HTTP
+endpoint on service-labeled.
+
+.. code:: yaml
+
+    apiVersion: "cilium.io/v2"
+    kind: CiliumNetworkPolicy
+    description: "L7 policy for accessing /public address on service endpoints"
+    metadata:
+      name: "rule1"
+    spec:
+      endpointSelector:
+        matchLabels:
+          app: service
+      ingress:
+      - fromEndpoints:
+        - matchLabels:
+            env: prod
+        toPorts:
+        - ports:
+          - port: "80"
+            protocol: TCP
+          rules:
+            http:
+            - method: "GET"
+              path: "/public"
+
+Example (Multiple Rules)
+------------------------
+
+This example builds on previous example to show how to define multiple policy specs
+in single rule. Added spec allows production pods to POST requests to ``external-service.org``.
+
+.. code:: yaml
+
+    apiVersion: "cilium.io/v2"
+    kind: CiliumNetworkPolicy
+    metadata:
+      name: "fancyrule"
+    specs:
+      - endpointSelector:
+          matchLabels:
+            app: service
+        ingress:
+        - fromEndpoints:
+          - matchLabels:
+              env: prod
+          toPorts:
+          - ports:
+            - port: "80"
+              protocol: TCP
+            rules:
+              http:
+              - method: "GET"
+                path: "/public"
+      - endpointSelector:
+          matchLabels:
+            env: prod
+        egress:
+        - toPorts:
+          - ports:
+            - port: "80"
+              protocol: TCP
+            rules:
+              http:
+              - method: "POST"
+                host: "^external-service.org$"
+
+***********************
+Policy Enforcement Mode
+***********************
+
+Whether an endpoint accepts traffic from any source is dependent upon the
+configuration for policy enforcement in the daemon. 
+
+Policy enforcement is configurable at runtime by running:
+
+.. code:: bash
+
+    cilium config PolicyEnforcement={default,always,never}
+
+If you want to have a certain policy enforcement configuration value at
+launch-time , you can provide the following flag when you launch the Cilium
+daemon:
+
+.. code:: bash
+
+    enable-policy={default,always,never}
+
+Cilium has three different modes for policy enforcement:
+
+* **default**
+
+This is the behavior for policy enforcement when Cilium is launched without
+any specified value for policy enforcement configuration. It is based off of
+Kubernetes_ behavior for allowing traffic from outside sources. Specifically,
+by default, endpoints receive traffic from any source (policy enforcement is
+disabled for endpoints). When a policy rule is added to Cilium that selects an
+endpoint, the endpoint will not allow traffic except that which is specified
+by the rule (policy enforcement is enabled).
+
+* **always**
+
+With this mode, policy enforcement is enabled on all endpoints, even if no
+rules select specific endpoints.
+ 
+* **never**
+
+With this mode, policy enforcement is disabled on all endpoints, even if rules
+do select specific endpoints. In other words, all traffic is allowed from any
+source with respect to an endpoint.
+
 *******
 Tracing
 *******
@@ -539,29 +763,35 @@ endpoint with the label ``id.http`` on port 80:
 
     $ cilium policy trace -s id.curl -d id.httpd --dport 80
     Tracing From: [container:id.curl] => To: [container:id.httpd] Ports: [80/any]
-    * Rule 2 {"matchLabels":{"any:id.httpd":""}}: match
+    * Rule {"matchLabels":{"any:id.httpd":""}}: selected
         Allows from labels {"matchLabels":{"any:id.curl":""}}
-    +     Found all required labels
-    1 rules matched
-    Result: ALLOWED
-    L3 verdict: allowed
+          Found all required labels
+            Rule restricts traffic to specific L4 destinations; deferring policy decision to L4 policy stage
+    1/1 rules selected
+    Found no allow rule
+    Label verdict: undecided
 
     Resolving egress port policy for [container:id.curl]
-    * Rule 0 {"matchLabels":{"any:id.curl":""}}: match
+    * Rule {"matchLabels":{"any:id.curl":""}}: selected
       Allows Egress port [{80 tcp}]
-    1 rules matched
+        Found all required labels
+    1/1 rules selected
+    Found allow rule
     L4 egress verdict: allowed
 
     Resolving ingress port policy for [container:id.httpd]
-    * Rule 2 {"matchLabels":{"any:id.httpd":""}}: match
+    * Rule {"matchLabels":{"any:id.httpd":""}}: selected
       Allows Ingress port [{80 tcp}]
-    1 rules matched
+        Found all required labels
+    1/1 rules selected
+    Found allow rule
     L4 ingress verdict: allowed
 
-    Verdict: allowed
+    Final verdict: ALLOWED
 
 .. _NetworkPolicy: https://kubernetes.io/docs/concepts/services-networking/network-policies/
 
 .. _ThirdPartyResource: https://kubernetes.io/docs/tasks/access-kubernetes-api/extend-api-third-party-resource/
 .. _CustomResourceDefinition: https://kubernetes.io/docs/concepts/api-extension/custom-resources/#customresourcedefinitions
 .. _LabelSelector: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors
+.. _Kubernetes: https://kubernetes.io/docs/concepts/services-networking/network-policies/#isolated-and-non-isolated-pods

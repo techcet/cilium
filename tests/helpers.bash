@@ -5,6 +5,7 @@ DUMP_FILE=$(mktemp)
 MONITOR_PID=""
 LAST_LOG_DATE=""
 TEST_NET=cilium
+GOPS="/home/vagrant/go/bin/gops"
 
 # Variables used during Jenkins builds.
 BUILD_NUM="${BUILD_NUMBER:-0}"
@@ -22,32 +23,102 @@ for bin in "../cilium/cilium" \
         fi
 done
 
+# Prevent Fedora rules in raw table from affecting the test.
+ip6tables -t raw -F 2> /dev/null || true
+
+function log {
+  local save=$-
+  set +u
+  check_num_params "$#" "1"
+  message=$1
+  local stack
+  for (( i=${#FUNCNAME[@]}-1 ; i>0 ; i-- )) ; do
+    if [[ "${stack}" == "" ]]; then
+      stack="$(basename $0): ${FUNCNAME[i]}"
+    else
+      stack="$stack/${FUNCNAME[i]}"
+    fi
+  done
+  echo "----- ${stack}: $message"
+  restore_flag $save "u"
+}
+
+# Usage: overwrite $iter 'commands --option --foo bar "quoted args" '
+# Executes the commands provided as parameters, moves the cursor back by the
+# number of lines output by the command, then prints the output of the command.
+# If $iter is zero, then the cursor is not moved; this is equivalent to
+# 'shift; eval "$@"'.
+function overwrite {
+  local iter=$1
+  shift
+
+  local output=$(eval "$@")
+  if [ ! -z $TERM ] && [ $iter -ne 0 ]; then
+    local ERASER=$(tput cuu1 ; tput el)
+    local n_lines=$(echo "$output" | wc -l)
+    for i in $(seq 1 $n_lines); do
+      echo -ne "$ERASER"
+    done
+  fi
+  echo "$output"
+}
+
+function get_filename_without_extension {
+  check_num_params "$#" "1"
+  local file=$(basename $1)
+  local filename="${file%.*}"
+  echo $filename
+}
+# Note: if you call this, do not change the value of the debug flag - you will make the shell segmentation fault :) 
+function redirect_debug_logs {
+  check_num_params "$#" "1"
+  local LOGS_DIR=$1
+  mkdir -p ${LOGS_DIR}
+  exec {BASH_XTRACEFD}>>${LOGS_DIR}/debug.txt
+}
+
 function monitor_start {
+  local save=$-
+  set +e
+  log "starting monitor and dumping contents to $DUMP_FILE"
   cilium monitor -v $@ > $DUMP_FILE &
   MONITOR_PID=$!
+  restore_flag $save "e"
 }
 
 function monitor_resume {
+  local save=$-
+  set +e
+  log "resuming monitor and dumping contents to $DUMP_FILE"
   cilium monitor -v $@ >> $DUMP_FILE &
   MONITOR_PID=$!
+  restore_flag $save "e"
 }
 
 function monitor_clear {
-  set +x
+  local save=$-
+  set +e
+  log "clearing monitor"
   cp /dev/null $DUMP_FILE
   nstat > /dev/null
-  set -x
+  restore_flag $save "e"
 }
 
 function monitor_dump {
+  local save=$-
+  set +e
   nstat
   cat $DUMP_FILE
+  restore_flag $save "e"
 }
 
 function monitor_stop {
+  local save=$-
+  set +e
   if [ ! -z "$MONITOR_PID" ]; then
-    kill $MONITOR_PID || true
+    kill $MONITOR_PID || true > /dev/null 2>&1
   fi
+  restore_flag $save "e"
 }
 
 function logs_clear {
@@ -55,8 +126,7 @@ function logs_clear {
 }
 
 function abort {
-  set +x
-
+  set +e
   echo "------------------------------------------------------------------------"
   echo "                            Test Failed"
   echo "$*"
@@ -79,6 +149,20 @@ function micro_sleep {
   sleep 0.5
 }
 
+function kafka_consumer_delay {
+  # wait for kafka consumer to come up
+  sleep 5
+}
+
+function restore_flag {
+  check_num_params "$#" "2"
+  local save=$1
+  local flag=$2
+  if [[ $save =~ $2 ]]; then
+    set -$2
+  fi
+}
+
 function check_num_params {
   local NUM_PARAMS=$1
   local NUM_EXPECTED_PARAMS=$2
@@ -89,31 +173,53 @@ function check_num_params {
 }
 
 function wait_for_endpoints {
+  local save=$-
+  set +e
   check_num_params "$#" "1"
   local NUM_DESIRED="$1"
   local CMD="cilium endpoint list | grep -v \"not-ready\" | grep ready -c || true"
   local INFO_CMD="cilium endpoint list"
   local MAX_MINS="2"
   local ERROR_OUTPUT="Timeout while waiting for $NUM_DESIRED endpoints"
+  log "waiting for up to ${MAX_MINS} mins for ${NUM_DESIRED} endpoints to be in \"ready\" state"
   wait_for_desired_state "$NUM_DESIRED" "$CMD" "$INFO_CMD" "$MAX_MINS" "$ERROR_OUTPUT"
+  log "done waiting for up to ${MAX_MINS} mins for ${NUM_DESIRED} endpoints to be in \"ready\" state"
+  restore_flag $save "e"
+}
+
+function wait_for_endpoints_deletion {
+  local save=$-
+  set +e
+  local NUM_DESIRED="2" # When no endpoints are present there should be two lines only.
+  local CMD="cilium endpoint list | wc -l || true"
+  local INFO_CMD="cilium endpoint list"
+  local MAX_MINS="2"
+  local ERROR_OUTPUT="Timeout while waiting for endpoint removal"
+  log "waiting for up to ${MAX_MINS} mins for all endpoints to be removed"
+  wait_for_desired_state "$NUM_DESIRED" "$CMD" "$INFO_CMD" "$MAX_MINS" "$ERROR_OUTPUT"
+  log "done waiting"
+  restore_flag $save "e"
 }
 
 function k8s_num_ready {
+  local save=$-
+  set +e
   local NAMESPACE=$1
   local CILIUM_POD=$2
   local FILTER=$3
-
   kubectl -n ${NAMESPACE} exec ${CILIUM_POD} cilium endpoint list | grep $FILTER | grep -v 'not-ready' | grep -c 'ready' || true
+  restore_flag $save "e"
 }
 
 function wait_for_k8s_endpoints {
-  set +x
+  local save=$-
+  set +e
   check_num_params "$#" "4"
   local NAMESPACE=$1
   local CILIUM_POD=$2
   local NUM=$3
   local FILTER=$4
-  echo "Waiting for $NUM endpoints in namespace $NAMESPACE managed by $CILIUM_POD"
+  log "Waiting for $NUM endpoints in namespace $NAMESPACE managed by $CILIUM_POD"
 
   # Wait some time for at least one endpoint to get into regenerating state
   # FIXME: Remove when this is reliable
@@ -121,24 +227,29 @@ function wait_for_k8s_endpoints {
 
   local sleep_time=1
   local iter=0
-  local found=$(k8s_num_ready $NAMESPACE $CILIUM_POD $FILTER)
-  echo "found: $found"
+  local found
+  found=$(k8s_num_ready "${NAMESPACE}" "${CILIUM_POD}" "${FILTER}")
+  log "found: $found"
   while [[ "$found" -ne "$NUM" ]]; do
-    if [[ $((iter++)) -gt $((5*60/$sleep_time)) ]]; then
+    if [[ $iter -gt $((5*60/$sleep_time)) ]]; then
       echo ""
-      echo "Timeout while waiting for $NUM endpoints"
+      log "Timeout while waiting for $NUM endpoints"
+      restore_flag $save "e"
       exit 1
     else
-      kubectl -n ${NAMESPACE} exec ${CILIUM_POD} cilium endpoint list
-      echo -n " [${found}/${NUM}]"
+      overwrite $iter '
+        kubectl -n ${NAMESPACE} exec ${CILIUM_POD} cilium endpoint list
+        echo -n " [${found}/${NUM}]"
+      '
       sleep $sleep_time
     fi
-    found=$(k8s_num_ready $NAMESPACE $CILIUM_POD $FILTER)
-    echo "found: $found"
+    found=$(k8s_num_ready "${NAMESPACE}" "${CILIUM_POD}" "${FILTER}")
+    log "found: $found"
+    ((iter++))
   done
 
-  set -x
-  kubectl -n ${NAMESPACE} exec ${CILIUM_POD} cilium endpoint list
+  overwrite $iter 'kubectl -n ${NAMESPACE} exec ${CILIUM_POD} cilium endpoint list'
+  restore_flag $save "e"
 }
 
 function wait_for_cilium_status {
@@ -151,7 +262,6 @@ function wait_for_cilium_status {
 }
 
 function wait_for_kubectl_cilium_status {
-  set +x
   check_num_params "$#" "2"
   namespace=$1
   pod=$2
@@ -164,10 +274,29 @@ function wait_for_kubectl_cilium_status {
 }
 
 function wait_for_cilium_ep_gen {
-  set +x
+  local save=$-
+  set +e
+  local MODE=$1
+
+  local NAMESPACE
+  local POD
+  local CMD
+  local INFO_CMD
+
+  if [[ "$MODE" == "k8s" ]]; then
+    # Only care about provided params if mode is K8s.
+    check_num_params "$#" "3"
+    log "mode is K8s"
+    NAMESPACE=$2
+    POD=$3
+    CMD="kubectl exec -n ${NAMESPACE} ${POD} -- cilium endpoint list | grep -c regenerating"
+    INFO_CMD="kubectl exec -n ${NAMESPACE} ${POD} -- cilium endpoint list"
+  else
+    CMD="cilium endpoint list | grep -c regenerating"
+    INFO_CMD="cilium endpoint list"
+  fi
+
   local NUM_DESIRED="0"
-  local CMD="cilium endpoint list | grep -c regenerating"
-  local INFO_CMD="true"
   local MAX_MINS="2"
   local ERROR_OUTPUT="Timeout while waiting for endpoints to regenerate"
  
@@ -180,71 +309,82 @@ function wait_for_cilium_ep_gen {
   while [[ "$check_cmd_iter" -lt "10" ]]; do    
     if [[ "$total_cmd_iter" -gt $((${MAX_MINS}*60/$sleep_time)) ]]; then
       echo ""
-      echo "$ERROR_OUTPUT"
+      log "$ERROR_OUTPUT"
       exit 1
     fi
 
     local iter=0
-    local found=$(eval "$CMD")
-    echo "found: $found"
+    local found
+    found=$(eval "$CMD")
 
     while [[ "$found" -ne "$NUM_DESIRED" ]]; do
+      log "$found endpoints are still regenerating; want $NUM_DESIRED"
       if [[ $((iter++)) -gt $((${MAX_MINS}*60/$sleep_time)) ]]; then
         echo ""
-        echo $ERROR_OUTPUT
+        log "${ERROR_OUTPUT}"
         exit 1
       else
-        eval "$INFO_CMD"
-        echo -n " [$found/$NUM_DESIRED]"
-        # If command fails and iter is non-zero, reset iter back to zero.
-        check_cmd_iter=0
+        overwrite $total_cmd_iter '
+          log "still within time limit for waiting for endpoints to be in 'ready' state; sleeping and checking again"
+          log "output of ${INFO_CMD}"
+          eval "$INFO_CMD"
+          echo -n " [$found/$NUM_DESIRED]"
+          # If command fails and iter is non-zero, reset iter back to zero.
+          log "setting command counter to zero"
+          log "sleeping for $sleep_time"
+        '
+        check_cmd_iter=0; \
         sleep $sleep_time
       fi
+      log "evaluating $CMD"
       found=$(eval "${CMD}")
-      echo "found: $found"
+      log "found: $found"
     done
     check_cmd_iter=$(expr $check_cmd_iter + 1)
     total_cmd_iter=$(expr $total_cmd_iter + 1)
     sleep .25
   done
-  set -x
+  set -e 
+  restore_flag $save "e"
 }
 
 function wait_for_daemon_set_not_ready {
-  set +x
-
+  local save=$-
+  set +e
   check_num_params "$#" "2"
 
   local namespace="${1}"
   local name="${2}"
 
-  echo "Waiting for instances of Cilium daemon $name in namespace $namespace to be clean up"
+  log "Waiting for instances of Cilium daemon $name in namespace $namespace to be clean up"
 
   local sleep_time=2
   local iter=0
   local found="0"
   until [[ "$found" -eq "1" ]]; do
-    if [[ $((iter++)) -gt $((5*60/$sleep_time)) ]]; then
+    if [[ $iter -gt $((5*60/$sleep_time)) ]]; then
       echo ""
-      echo "Timeout while waiting for cilium agent to be clean up by kubernetes"
+      log "Timeout while waiting for cilium agent to be clean up by kubernetes"
       print_k8s_cilium_logs
       exit 1
     else
-      kubectl -n ${namespace} get pods -o wide
+      overwrite $iter 'kubectl -n ${namespace} get pods -o wide'
       sleep $sleep_time
     fi
     kubectl get pods -n ${namespace} | grep ${name} -q
     found=$?
-   done
+    ((iter++))
+  done
 
-   set -x
-   kubectl -n kube-system get pods -o wide
+  overwrite $iter 'kubectl -n kube-system get pods -o wide'
+  restore_flag $save "e"
 }
 
 function wait_for_policy_enforcement {
-  local NUM_DESIRED="0"
+  check_num_params "$#" "1" 
+  local NUM_DESIRED="$1"
   local CMD="cilium endpoint list | grep -c Disabled"
-  local INFO_CMD="true"
+  local INFO_CMD="cilium endpoint list"
   local MAX_MINS="2"
   local ERROR_OUTPUT="Timeout while waiting for policy to be enabled for all endpoints"
   wait_for_desired_state "$NUM_DESIRED" "$CMD" "$INFO_CMD" "$MAX_MINS" "$ERROR_OUTPUT"
@@ -255,105 +395,112 @@ function count_lines_in_log {
 }
 
 function wait_for_log_entries {
-  set +x
   check_num_params "$#" "1"
   local expected=$(($1 + $(count_lines_in_log)))
   wait_specified_time_test "test \"\$(count_lines_in_log)\" -ge \"$expected\"" "2"
-  set -x
 }
 
 function wait_for_docker_ipv6_addr {
-  set +x
   check_num_params "$#" "1"
   name=$1
   wait_specified_time_test "test \"\$(docker inspect --format '{{ .NetworkSettings.Networks.cilium.GlobalIPv6Address }}' $name)\" != \"\"" "2"
-  set -x
 }
 
 function wait_for_running_pod {
-  set +x
   pod=$1
   namespace=${2:-default}
-  echo "Waiting for ${pod} pod to be Running..."
+  log "Waiting for ${pod} pod to be Running..."
   wait_specified_time_test "test \"\$(kubectl get pods -n ${namespace} -o wide | grep ${pod} | grep -c Running)\" -eq \"1\"" "5"
-  set -x
 }
 
 function wait_for_no_pods {
-  set +x
   namespace=${1:-default}
-  echo "Waiting for no pods to be Running in namespace ${namespace}"
+  log "Waiting for no pods to be Running in namespace ${namespace}"
   wait_specified_time_test "test \"\$(kubectl get pods -n ${namespace} -o wide 2>&1 | grep -c 'No resources found')\" -eq \"1\"" "5"
-  set -x
 }
 
 function wait_for_n_running_pods {
-  set +x
+  local save=$-
+  set +e
   check_num_params "$#" "1"
   local NPODS=$1
-  echo -n "Waiting for $NPODS running pods"
+  log "Waiting for $NPODS running pods"
 
   local sleep_time=1
   local iter=0
-  local found=$(kubectl get pod | grep Running -c || true)
+  local found
+  found=$(kubectl get pod | grep Running -c || true)
   until [[ "$found" -eq "$NPODS" ]]; do
-    if [[ $((iter++)) -gt $((5*60/$sleep_time)) ]]; then
+    if [[ $iter -gt $((5*60/$sleep_time)) ]]; then
       echo ""
-      echo "Timeout while waiting for $NPODS running pods"
+      log "Timeout while waiting for $NPODS running pods"
       exit 1
     else
-      kubectl get pod -o wide
-      echo -n " [${found}/${NPODS}]"
+      overwrite $iter '
+        kubectl get pod -o wide
+        echo -n " [${found}/${NPODS}]"
+      '
       sleep $sleep_time
     fi
     found=$(kubectl get pod | grep Running -c || true)
+    ((iter++))
   done
 
-  set -x
-  kubectl get pod -o wide
+  overwrite $iter 'kubectl get pod -o wide'
+  restore_flag $save "e"
 }
 
 # Wait for healthy k8s cluster on $1 nodes
 function wait_for_healthy_k8s_cluster {
-  set +x
+  local save=$-
+  set +e
   local NNODES=$1
-  echo "Waiting for healthy k8s cluster with $NNODES nodes"
+  log "Waiting for healthy k8s cluster with $NNODES nodes"
 
   local sleep_time=2
   local iter=0
-  local found=$(kubectl get cs | grep -v "STATUS" | grep -c "Healthy")
+  local found
+  found=$(kubectl get cs | grep -v "STATUS" | grep -c "Healthy")
   until [[ "$found" -eq "3" ]]; do
-    if [[ $((iter++)) -gt $((1*60/$sleep_time)) ]]; then
+    if [[ $iter -gt $((1*60/$sleep_time)) ]]; then
       echo ""
-      echo "Timeout while waiting for healthy kubernetes cluster"
+      log "Timeout while waiting for healthy kubernetes cluster"
       exit 1
     else
-      kubectl get cs
-      echo "K8S Components ready: [${found}/3]"
+      overwrite $iter '
+        kubectl get cs
+        log "K8S Components ready: [${found}/3]"
+      '
       sleep $sleep_time
     fi
     found=$(kubectl get cs | grep -v "STATUS" | grep -c "Healthy")
+    ((iter++))
   done
-  set -x
-  kubectl get cs
+  overwrite $iter 'kubectl get cs'
   local iter=0
-  local found=$(kubectl get nodes | grep Ready -c)
+  local found
+  found=$(kubectl get nodes | grep Ready -c)
   until [[ "$found" -eq "$NNODES" ]]; do
-    if [[ $((iter++)) -gt $((1*60/$sleep_time)) ]]; then
+    if [[ $iter -gt $((1*60/$sleep_time)) ]]; then
       echo ""
-      echo "Timeout while waiting for all nodes to be Ready"
+      log "Timeout while waiting for all nodes to be Ready"
       exit 1
     else
-      kubectl get nodes
-      echo "Nodes ready [${found}/${NNODES}]"
+      overwrite $iter '
+        kubectl get nodes
+        log "Nodes ready [${found}/${NNODES}]"
+      '
       sleep $sleep_time
     fi
     found=$(kubectl get nodes | grep Ready -c)
+    ((iter++))
   done
+  restore_flag $save "e"
 }
 
 function k8s_nodes_policy_status {
-  set +x
+  local save=$-
+  set +e
   local sleep_time=2
   local NNODES=$1
   local policy_ns=$2
@@ -361,26 +508,29 @@ function k8s_nodes_policy_status {
   local iter=0
   local nodes=$(kubectl get ciliumnetworkpolicies -n "${policy_ns}" "${policy_name}" -o go-template --template='{{len .status.nodes}}')
   until [[ "${nodes}" -eq "${NNODES}" ]]; do
-    if [[ $((iter++)) -gt $((1*60/$sleep_time)) ]]; then
+    if [[ $iter -gt $((1*60/$sleep_time)) ]]; then
       echo ""
-      echo "Timeout while waiting for $NNODES to have policy ${policy_ns}/${policy_name} installed"
+      log "Timeout while waiting for $NNODES to have policy ${policy_ns}/${policy_name} installed"
       exit 1
     else
-      kubectl get nodes
-      echo "Nodes with policy accepted [${found}/${NNODES}]"
+      overwrite $iter '
+        kubectl get nodes
+        log "Nodes with policy accepted [${found}/${NNODES}]"
+      '
       sleep $sleep_time
     fi
     found=$(kubectl get nodes | grep Ready -c)
+    ((iter++))
   done
 
-  set -x
   kubectl get ciliumnetworkpolicies -n "${policy_ns}" "${policy_name}" -o go-template --template='{{.status.nodes}}'
+  restore_flag $save "e"
 }
 
 function gather_files {
-  set -xv
   local TEST_NAME=$1
   local TEST_SUITE=$2
+  log "gathering files for test $TEST_NAME in test suite $TEST_SUITE"
   local CILIUM_ROOT="src/github.com/cilium/cilium"
   if [ -z "${TEST_SUITE}" ]; then
     TEST_SUITE="runtime-tests"
@@ -393,35 +543,49 @@ function gather_files {
   elif [[ "${TEST_SUITE}" == "k8s-tests" ]]; then
     CILIUM_DIR="${GOPATH}/${CILIUM_ROOT}/tests/k8s/tests/cilium-files/${TEST_NAME}"
   else
-    echo "${TEST_SUITE} not a valid value, continuing"
+    log "${TEST_SUITE} not a valid value, continuing"
     CILIUM_DIR="${GOPATH}/${CILIUM_ROOT}/tests/cilium-files/${TEST_NAME}"
   fi
   local RUN="/var/run/cilium"
   local LIB="/var/lib/cilium"
   local RUN_DIR="${CILIUM_DIR}${RUN}"
   local LIB_DIR="${CILIUM_DIR}${LIB}"
-  mkdir -p ${CILIUM_DIR}
-  mkdir -p ${RUN_DIR}
-  mkdir -p ${LIB_DIR}
+  mkdir -p "${CILIUM_DIR}"
+  mkdir -p "${RUN_DIR}"
+  mkdir -p "${LIB_DIR}"
   if [[ "${TEST_SUITE}" == "runtime-tests" ]]; then
     local CLI_OUT_DIR="${CILIUM_DIR}/cli"
-    mkdir -p ${CLI_OUT_DIR}
-    dump_cli_output ${CLI_OUT_DIR} || true
+    local PROF_OUT_DIR="${CILIUM_DIR}/profiling"
+    mkdir -p "${CLI_OUT_DIR}"
+    dump_cli_output "${CLI_OUT_DIR}" || true
+    dump_gops_output "${PROF_OUT_DIR}" "cilium-agent" || true
     # Get logs from Consul container.
-    mkdir -p ${CILIUM_DIR}/consul
-    docker logs cilium-consul > ${CILIUM_DIR}/consul/consul-logs.txt 2>/dev/null
+    mkdir -p "${CILIUM_DIR}/consul"
+    docker logs cilium-consul > "${CILIUM_DIR}/consul/consul-logs.txt" 2>/dev/null
+  else 
+    # Get logs from each Cilium pod.
+    local NAMESPACE="kube-system" 
+    local CILIUM_POD_1=$(kubectl -n ${NAMESPACE} get pods -l k8s-app=cilium | awk 'NR==2{ print $1 }')
+    local CILIUM_POD_2=$(kubectl -n ${NAMESPACE} get pods -l k8s-app=cilium | awk 'NR==3{ print $1 }')
+    local CLI_OUT_DIR=${CILIUM_DIR}/cli
+    mkdir -p "${CLI_OUT_DIR}"
+    log "gathering Cilium logs from pod ${CILIUM_POD_1}"
+    dump_cli_output_k8s "${CLI_OUT_DIR}" "${NAMESPACE}" "${CILIUM_POD_1}" || true
+    log "gathering Cilium logs from pod ${CILIUM_POD_2}"
+    dump_cli_output_k8s "${CLI_OUT_DIR}" "${NAMESPACE}" "${CILIUM_POD_2}" || true
   fi
-  sudo cp -r ${RUN}/state ${RUN_DIR} || true
-  sudo cp -r ${LIB}/* ${LIB_DIR} || true
-  find ${CILIUM_DIR} -type d -exec sudo chmod 777 {} \;
-  find ${CILIUM_DIR} -exec sudo chmod a+r {} \;
+  sudo cp -r ${RUN}/state "${RUN_DIR}" || true
+  sudo cp -r ${LIB}/* "${LIB_DIR}" || true
+  find "${CILIUM_DIR}" -type d -exec sudo chmod 777 {} \;
+  find "${CILIUM_DIR}" -exec sudo chmod a+r {} \;
+  log "finished gathering files for test $TEST_NAME in test suite $TEST_SUITE"
 }
 
 function dump_cli_output {
   check_num_params "$#" "1"
   local DIR=$1
   cilium endpoint list > ${DIR}/endpoint_list.txt
-  local EPS=$(cilium endpoint list | tail -n+3 | awk '{print $1}' | grep -o '[0-9]*')
+  local EPS=$(cilium endpoint list | tail -n+3 | grep '^[0-9]' | awk '{print $1}')
   for ep in ${EPS} ; do
     cilium endpoint get ${ep} > ${DIR}/endpoint_get_${ep}.txt
     cilium bpf policy list ${ep} > ${DIR}/bpf_policy_list_${ep}.txt
@@ -443,6 +607,51 @@ function dump_cli_output {
   cilium status > ${DIR}/status.txt
 }
 
+function dump_cli_output_k8s {
+  check_num_params "$#" "3"
+  local DIR=$1
+  local NAMESPACE=$2
+  local POD=$3
+  kubectl exec -n ${NAMESPACE} ${POD} -- cilium endpoint list > ${DIR}/${POD}_endpoint_list.txt
+  local EPS=$(kubectl exec -n ${NAMESPACE} ${POD} -- cilium endpoint list | tail -n+3 | grep '^[0-9]' | awk '{print $1}')
+  for ep in ${EPS} ; do
+    kubectl exec -n ${NAMESPACE} ${POD} -- cilium endpoint get ${ep} > ${DIR}/${POD}_endpoint_get_${ep}.txt
+    kubectl exec -n ${NAMESPACE} ${POD} -- cilium bpf policy list ${ep} > ${DIR}/${POD}_bpf_policy_list_${ep}.txt
+  done
+  kubectl exec -n ${NAMESPACE} ${POD} -- cilium service list > ${DIR}/${POD}_service_list.txt
+  local SVCS=$(kubectl exec -n ${NAMESPACE} ${POD} -- cilium service list | tail -n+2 | awk '{print $1}')
+  for svc in ${SVCS} ; do
+    kubectl exec -n ${NAMESPACE} ${POD} -- cilium service get ${svc} > ${DIR}/${POD}_service_get_${svc}.txt
+  done
+  local IDS=$(kubectl exec -n ${NAMESPACE} ${POD} -- cilium endpoint list | tail -n+3 | awk '{print $3}' | grep -o '[0-9]*')
+  for id in ${IDS} ; do
+    kubectl exec -n ${NAMESPACE} ${POD} -- cilium identity get ${id} > ${DIR}/${POD}_identity_get_${id}.txt
+  done
+  kubectl exec -n ${NAMESPACE} ${POD} -- cilium config > ${DIR}/${POD}_config.txt
+  kubectl exec -n ${NAMESPACE} ${POD} -- cilium bpf lb list > ${DIR}/${POD}_bpf_lb_list.txt
+  kubectl exec -n ${NAMESPACE} ${POD} -- cilium bpf ct list global > ${DIR}/${POD}_bpf_ct_list_global.txt
+  kubectl exec -n ${NAMESPACE} ${POD} -- cilium bpf tunnel list > ${DIR}/${POD}_bpf_tunnel_list.txt
+  kubectl exec -n ${NAMESPACE} ${POD} -- cilium policy get > ${DIR}/${POD}_policy_get.txt
+  kubectl exec -n ${NAMESPACE} ${POD} -- cilium status > ${DIR}/${POD}_status.txt
+}
+
+function dump_gops_output {
+  check_num_params "$#" "2"
+  local DIR="$1"
+  local PROG="$2"
+  local PROG_PROFILING_DIR="${DIR}/${PROG}"
+  mkdir -p "${PROG_PROFILING_DIR}"
+  log "getting gops output for ${PROG} and dumping to dir ${PROG_PROFILING_DIR}"
+  local PROG_PID=$(sudo ${GOPS} | grep "${PROG}" | awk '{print $1}')
+  log "running \"gops stack\" for ${PROG}"
+  sudo ${GOPS} stack ${PROG_PID} > "${PROG_PROFILING_DIR}/${PROG}_stack.txt"
+  log "running \"gops memstats\" for ${PROG}"
+  sudo ${GOPS} memstats ${PROG_PID} > "${PROG_PROFILING_DIR}/${PROG}_memstats.txt"
+  log "running \"gops stats\" for ${PROG}"
+  sudo ${GOPS} stats ${PROG_PID} > "${PROG_PROFILING_DIR}/${PROG}_stats.txt"
+  log "done getting gops output for ${PROG}"
+}
+
 function print_k8s_cilium_logs {
   for pod in $(kubectl -n kube-system get pods -o wide| grep cilium | awk '{print $1}'); do
     kubectl -n kube-system logs $pod
@@ -453,38 +662,43 @@ function print_k8s_cilium_logs {
 }
 
 function wait_for_daemon_set_ready {
-  set +x
-
+  local save=$-
+  set +e
   check_num_params "$#" "3"
 
   local namespace="${1}"
   local name="${2}"
   local n_ds_expected="${3}"
 
-  echo "Waiting for $n_ds_expected instances of Cilium daemon $name in namespace $namespace to become ready"
+  log "Waiting for $n_ds_expected instances of Cilium daemon $name in namespace $namespace to become ready"
 
   local sleep_time=2
   local iter=0
   local found="0"
   until [[ "$found" -eq "$n_ds_expected" ]]; do
-    if [[ $((iter++)) -gt $((5*60/$sleep_time)) ]]; then
+    if [[ $iter -gt $((5*60/$sleep_time)) ]]; then
       echo ""
-      echo "Timeout while waiting for cilium agent"
+      log "Timeout while waiting for cilium agent"
       print_k8s_cilium_logs
       exit 1
     else
-      kubectl -n kube-system get ds
-      kubectl -n kube-system get pods -o wide
-      echo -n " [${found}/${n_ds_expected}]"
+      overwrite $iter '
+        kubectl -n kube-system get ds
+        kubectl -n kube-system get pods -o wide
+        echo -n " [${found}/${n_ds_expected}]"
+      '
       sleep $sleep_time
     fi
     found=$(kubectl get ds -n ${namespace} ${name} 2>&1 | awk 'NR==2{ print $4 }')
+    ((iter++))
   done
-  set -x
-  kubectl -n kube-system get pods -o wide
+  overwrite $iter 'kubectl -n kube-system get pods -o wide'
+  restore_flag $save "e"
 }
 
 function k8s_wait_for_cilium_status_ready {
+  local save=$-
+  set +e
   local pod
   check_num_params "$#" "1"
   local namespace=$1
@@ -493,9 +707,12 @@ function k8s_wait_for_cilium_status_ready {
   for pod in $pods; do
     wait_for_kubectl_cilium_status $namespace $pod
   done
+  restore_flag $save "e"
 }
 
 function k8s_count_all_cluster_cilium_eps {
+  local save=$-
+  set +e
   local total=0
   check_num_params "$#" "1"
   local pod
@@ -508,25 +725,43 @@ function k8s_count_all_cluster_cilium_eps {
   done
 
   echo "$total"
+  restore_flag $save "e"
 }
 
 function wait_for_api_server_ready {
-  set +x
-  echo "Waiting for kube-apiserver to spin up"
+  log "Waiting for kube-apiserver to spin up"
   wait_specified_time_test "test \$(kubectl get cs)" "10"
-  set -x
 }
 
 function wait_for_service_endpoints_ready {
-  set +x
   check_num_params "$#" "3"
   local namespace="${1}"
   local name="${2}"
   local port="${3}"
 
-  echo "Waiting for ${name} service endpoints to be ready"
+  log "Waiting for ${name} service endpoints to be ready"
   wait_specified_time_test "test \"\$(kubectl get endpoints -n ${namespace} ${name} | grep -c \":${port}\")\" -eq \"1\"" "5"
-  set -x
+  log "Done waiting for ${name} service endpoints to be ready"
+  kubectl get endpoints -n ${namespace} ${name}
+}
+
+function wait_for_service_ready_cilium_pod {
+  check_num_params "$#" "4"
+  local namespace="${1}"
+  local pod="${2}"
+  local fe_port="${3}"
+  # TODO: only works for one backend right now.
+  local be_port="${4}"
+
+  log "Waiting for Cilium pod ${pod} to have services ready with frontend port: ${fe_port} and backend port: ${be_port}"
+  
+  wait_specified_time_test "test \"\$(kubectl -n ${namespace} exec ${pod} -- cilium service list | awk '{ print \$2 }' | grep -c \":${fe_port}\")\" -ge \"1\"" "5"
+  wait_specified_time_test "test \"\$(kubectl -n ${namespace} exec ${pod} -- cilium service list | awk '{ print \$5 }' | grep -c \":${be_port}\")\" -ge \"1\"" "5"
+  
+  log "Done waiting for Cilium pod ${pod} to have services ready with frontend port: ${fe_port} and backend port: ${be_port}"
+  
+  log "Listing all services:"
+  kubectl -n ${namespace} exec ${pod} -- cilium service list
 }
 
 function k8s_apply_policy {
@@ -544,7 +779,7 @@ function k8s_apply_policy {
     currentRevison[$pod]=$rev
   done
 
-  echo "Current policy revisions:"
+  log "Current policy revisions:"
   for i in "${!currentRevison[@]}"
   do
     echo "  $i: ${currentRevison[$i]}"
@@ -554,7 +789,7 @@ function k8s_apply_policy {
 
   for pod in $pods; do
     local nextRev=$(expr ${currentRevison[$pod]} + 1)
-    echo "Waiting for agent $pod endpoints to get to revision $nextRev"
+    log "Waiting for agent $pod endpoints to get to revision $nextRev"
     timeout 180s kubectl -n $namespace exec $pod -- cilium policy wait $nextRev
   done
 
@@ -563,11 +798,13 @@ function k8s_apply_policy {
 }
 
 function policy_delete_and_wait {
+  log "deleting policy $* and waiting up to 120 seconds to complete"
   rev=$(cilium policy delete $* | grep Revision: | awk '{print $2}')
   timeout 120s cilium policy wait $rev
 }
 
 function policy_import_and_wait {
+  log "importing policy $* and waiting up to 120 seconds to complete"
   rev=$(cilium policy import $* | grep Revision: | awk '{print $2}')
   timeout 120s cilium policy wait $rev
 }
@@ -588,22 +825,25 @@ function copy_files_vm {
   check_num_params "$#" "2"
   local VM_NAME=$1
   local FILES_DIR=$2
+  local ID_FILE
+  local PORT
 
   # Check that the VM is running before we try to gather logs from it.
   check_vm_running $VM_NAME
 
-  echo "----- getting the VM identity file for $VM_NAME -----"
-  local ID_FILE=$(get_vm_identity_file $VM_NAME)
-  echo "----- getting the port for $VM_NAME to SSH -----"
-  local PORT=$(get_vm_ssh_port $VM_NAME)
+  log "getting the VM identity file for $VM_NAME"
+  ID_FILE=$(get_vm_identity_file $VM_NAME)
+  log "getting the port for $VM_NAME to SSH"
+  PORT=$(get_vm_ssh_port $VM_NAME)
 
-  echo "----- getting cilium logs from $VM_NAME -----"
+  log "getting cilium logs from $VM_NAME"
   vagrant ssh $VM_NAME -c 'sudo -E bash -c "journalctl --no-pager -u cilium > /home/vagrant/go/src/github.com/cilium/cilium/tests/cilium-files/cilium-logs && chmod a+r /home/vagrant/go/src/github.com/cilium/cilium/tests/cilium-files/cilium-logs"'
+  vagrant ssh $VM_NAME -c 'sudo -E bash -c "journalctl --no-pager -u cilium-docker > /home/vagrant/go/src/github.com/cilium/cilium/tests/cilium-files/cilium-docker-logs && chmod a+r /home/vagrant/go/src/github.com/cilium/cilium/tests/cilium-files/cilium-docker-logs"'
 
-  echo "----- listing all logs that will be gathered from $VM_NAME -----"
+  log "listing all logs that will be gathered from $VM_NAME"
   vagrant ssh $VM_NAME -c 'ls -altr /home/vagrant/go/src/github.com/cilium/cilium/tests/cilium-files'
 
-  echo "----- copying logs from $VM_NAME onto VM host for accessibility after VM is destroyed -----"
+  log "copying logs from $VM_NAME onto VM host for accessibility after VM is destroyed"
   scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -r -P ${PORT} -i ${ID_FILE} vagrant@127.0.0.1:/home/vagrant/go/src/github.com/cilium/cilium/${FILES_DIR} ${WORKSPACE}/cilium-files-${VM_NAME}
 }
 
@@ -618,11 +858,11 @@ function get_k8s_vm_name {
 }
 
 function get_cilium_master_vm_name {
-  if [ ! -z ${K8STAG} ] ; then
+  if [ ! -z "${K8STAG}" ] ; then
     local K8S_TAG="${K8STAG:-k8s}"
   fi
 
-  if [ ! -z ${BUILD_NUMBER} ] ; then
+  if [ ! -z "${BUILD_NUMBER}" ] ; then
     local BUILD_ID_NAME="-build-${BUILD_ID}"
   fi
 
@@ -632,22 +872,24 @@ function get_cilium_master_vm_name {
 function check_vm_running {
   check_num_params "$#" "1"
   local VM=$1
-  echo "----- getting status of VM $VM -----"
-  vagrant status $VM
-  echo "----- done getting status of VM $VM -----"
+  log "getting status of VM ${VM}"
+  vagrant status ${VM}
+  log "done getting status of VM ${VM}"
 
-  local VM_STATUS=`vagrant status $VM | grep $VM | awk '{print $2}'`
+  local VM_STATUS
+  VM_STATUS=`vagrant status ${VM} | grep ${VM} | awk '{print $2}'`
   if [[ "${VM_STATUS}" != "running" ]]; then
-    echo "$VM is not in \"running\" state; exiting"
-    exit 0
+    log "$VM is not in \"running\" state; exiting"
   else
-    echo "$VM is \"running\" continuing"
+    log "$VM is \"running\" continuing"
   fi
 }
 
 function wait_for_agent_socket {
   check_num_params "$#" "1"
   MAX_WAIT=$1
+
+  log "waiting at most ${MAX_WAIT} iterations for cilium agent socket"
   local i=0
 
   while [ "$i" -lt "$MAX_WAIT" ]; do
@@ -664,9 +906,11 @@ function wait_for_kill {
   check_num_params "$#" "2"
   TARGET_PID=$1
   MAX_WAIT=$2
+  
+  log "waiting at most ${MAX_WAIT} iterations for PID ${TARGET_PID} to be killed"
   local i=0
 
-  while [ $i -lt $MAX_WAIT ]; do
+  while [ $i -lt "${MAX_WAIT}" ]; do
     micro_sleep
     i=$[$i+1]
     if ! ps -p $TARGET_PID > /dev/null; then
@@ -681,6 +925,8 @@ function wait_for_kill {
 # executed consecutively with a 2 second pause until the output matches or the
 # timeout of 1 minute is reached.
 function diff_timeout() {
+  local save=$-
+  set +e
   local arg1="$1"
   local arg2="$2"
   local sleep_time=2
@@ -689,7 +935,7 @@ function diff_timeout() {
 
   until [[ "$found" -eq "1" ]]; do
     if [[ $((iter++)) -gt $((30)) ]]; then
-      echo "Timeout"
+      log "Timeout waiting for diff to be empty"
       abort "$DIFF"
     fi
 
@@ -700,6 +946,7 @@ function diff_timeout() {
       sleep $sleep_time
     fi
   done
+  restore_flag $save "e"
 }
 
 #######################################
@@ -722,33 +969,42 @@ function diff_timeout() {
 #   None
 #######################################
 function wait_for_desired_state {
+
+  local save=$-
+  set +e
   check_num_params "$#" "5"
   local NUM_DESIRED="$1"
   local CMD="$2"
   local INFO_CMD="$3"
   local MAX_MINS="$4"
   local ERROR_OUTPUT="$5"
-  set +x
   local sleep_time=1
   local iter=0
-  local found=$(eval "$CMD")
-  echo "found: $found"
+  local found
+  found=$(eval "$CMD")
+  log "waiting for at most ${MAX_MINS} minutes for command ${CMD} to succeed"
+  log "found: $found"
 
   while [[ "$found" -ne "$NUM_DESIRED" ]]; do
-    if [[ $((iter++)) -gt $((${MAX_MINS}*60/$sleep_time)) ]]; then
+    if [[ $iter -gt $((${MAX_MINS}*60/$sleep_time)) ]]; then
       echo ""
-      echo $ERROR_OUTPUT
+      log "$ERROR_OUTPUT"
       exit 1
     else
-      eval "$INFO_CMD"
-      echo -n " [$found/$NUM_DESIRED]"
+      overwrite $iter '
+        log "desired state not realized; will sleep and try again"
+        eval "$INFO_CMD"
+        echo -n " [$found/$NUM_DESIRED]"
+      '
       sleep $sleep_time
     fi
     found=$(eval "${CMD}")
-    echo "found: $found"
+    log "found: $found"
+    ((iter++))
   done
-  set -x
+  log "desired state realized for command ${CMD}"
   eval "${INFO_CMD}"
+  restore_flag $save "e"
 }
 
 #######################################
@@ -765,29 +1021,85 @@ function wait_for_desired_state {
 #   None
 #######################################
 function wait_specified_time_test {
-  set +x
+  local save=$-
+  set +e
   local CMD="$1"
   local MAX_MINS="$2"
 
   local sleep_time=1
   local iter=0
+ 
+  log "waiting for at most ${MAX_MINS} minutes for command ${CMD} to succeed"
   while [[ "${iter}" -lt $((${MAX_MINS}*60/$sleep_time)) ]]; do
     if eval "${CMD}" ; then
+      log "${CMD} succeeded"
       break
     fi
+    overwrite $iter '
+      log "${iter} < $((${MAX_MINS}*60/$sleep_time)) "
+      log "${CMD} did not succeed; sleeping and testing the command again"
+    '
     sleep ${sleep_time}
     iter=$((iter+1))
   done
   if [[ "${iter}" -ge $((${MAX_MINS}*60/$sleep_time)) ]]; then
-    echo "Timeout ${MAX_MINS} minutes exceeded for command \"$CMD\", Exiting with failure."
-    set -x
+    log "Timeout ${MAX_MINS} minutes exceeded for command \"$CMD\""
+    log "Exiting with failure."
     exit 1
   fi
+  log "${CMD} succeeded"
+  restore_flag $save "e"
 }
 
 function create_cilium_docker_network {
-  echo "------ creating Docker network of type Cilium ------"
+  log "creating Docker network of type Cilium"
   docker network inspect $TEST_NET 2> /dev/null || {
     docker network create --ipv6 --subnet ::1/112 --ipam-driver cilium --driver cilium $TEST_NET
   }
 }
+
+function remove_cilium_docker_network {
+  local save=$-
+  set +e
+  log "removing Docker network of type cilium"
+  docker network rm $TEST_NET > /dev/null 2>&1 
+  restore_flag $save "e"
+}
+
+function remove_all_containers {
+  docker rm -f $(docker ps --format '{{.Names}}' | grep -v cilium-consul) > /dev/null 2>&1 || true
+}
+
+function test_succeeded {
+  check_num_params "$#" "1"
+  local TEST_NAME="$1"
+  echo "============================================================"
+  echo "==                                                        =="
+  echo "==                                                        =="
+  echo "==                                                        =="
+  echo "    ${TEST_NAME} succeeded!"
+  echo "==                                                        =="
+  echo "==                                                        =="
+  echo "==                                                        =="
+  echo "============================================================"
+}
+
+function ping_fail {
+  check_num_params "$#" "2"
+  C1=$1
+  C2=$2
+  log "pinging $C2 from $C1 (expecting failure) "
+  docker exec -i  ${C1} bash -c "ping -c 5 ${C2}" && {
+      abort "Error: Unexpected success pinging ${C2} from ${C1}"
+  }
+}
+
+function ping_success {
+  check_num_params "$#" "2"
+  C1=$1
+  C2=$2
+  log "pinging $C2 from $C1 (expecting success) "
+  docker exec -i ${C1} bash -c "ping -c 5 ${C2}" || {
+    abort "Error: Could not ping ${C2} from ${C1}"
+  }
+} 

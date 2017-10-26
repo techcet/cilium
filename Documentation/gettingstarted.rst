@@ -11,10 +11,10 @@ your machine. It is designed to take 15-30 minutes.
 If you haven't read the :ref:`intro` yet, we'd encourage you to do that first.
 
 This document includes three different guides:
- * `Getting Started Using Kubernetes`_
+ * `Getting Started Using Kubernetes`_ (Estimated time 10-15 minutes)
  * `Getting Started Using Docker`_
- * `Getting Started Using Mesos`_ 
- 
+ * `Getting Started Using Mesos`_
+
 The guides follow the same basic flow.   The flow in the Kubernetes variant
 is more realistic of a production deployment, but is also a bit more complex.
 
@@ -43,7 +43,7 @@ Install ``kubectl`` version ``>= 1.6.3`` as described in the `Kubernetes Docs
 
 Install one of the `hypervisors supported by minikube <https://kubernetes.io/docs/tasks/tools/install-minikube/>`_.
 
-Install ``minikube`` ``>= 0.20`` as described on `minikube's github page
+Install ``minikube`` ``>= 0.22.3`` as described on `minikube's github page
 <https://github.com/kubernetes/minikube/releases>`_.
 
 Then, boot a minikube cluster with the Container Network Interface (CNI) network plugin enabled:
@@ -76,19 +76,21 @@ all other system relevant daemons and services.  The Cilium pod will run both th
 agent and the Cilium CNI plugin.  The Cilium daemonset also starts a pod running
 `Consul <https://www.consul.io/>`_ as the underlying key-value store.
 
-To deploy the Cilium Daemon Set, run:
+To deploy Cilium, run:
 
-::
+.. parsed-literal::
 
-    $ kubectl create -f https://raw.githubusercontent.com/cilium/cilium/master/examples/minikube/cilium-ds.yaml
+    $ kubectl create -f \ |SCM_WEB|\/examples/kubernetes/cilium.yaml
     clusterrole "cilium" created
     serviceaccount "cilium" created
     clusterrolebinding "cilium" created
-    daemonset "cilium-consul" created
+    configmap "cilium-config" created
+    secret "cilium-etcd-secrets" created
     daemonset "cilium" created
 
-Kubernetes is now deploying the Cilium Daemon Set as a pod on all cluster
-nodes. This operation is performed in the background.
+Kubernetes is now deploying Cilium with its RBAC, ConfigMap and Daemon Set as a
+pod on all cluster nodes. This operation is performed in the background.
+
 Run the following command to check the progress of the deployment:
 
 ::
@@ -96,7 +98,6 @@ Run the following command to check the progress of the deployment:
     $ kubectl get ds --namespace kube-system
     NAME            DESIRED   CURRENT   READY     NODE-SELECTOR   AGE
     cilium          1         1         1         <none>          2m
-    cilium-consul   1         1         1         <none>          2m
 
 Wait until the cilium and cilium-consul Deployments shows a ``READY``
 count of ``1`` like above.
@@ -123,9 +124,9 @@ with each deployment identified using the Kubernetes labels id=app1, id=app2,
 and id=app3.
 It also include a app1-service, which load-balances traffic to all pods with label id=app1.
 
-::
+.. parsed-literal::
 
-    $ kubectl create -f https://raw.githubusercontent.com/cilium/cilium/master/examples/minikube/demo.yaml
+    $ kubectl create -f \ |SCM_WEB|\/examples/minikube/demo.yaml
     service "app1-service" created
     deployment "app1" created
     deployment "app2" created
@@ -139,16 +140,15 @@ point the pod is ready.
 ::
 
     $ kubectl get pods,svc
-
     NAME                       READY     STATUS              RESTARTS   AGE
-    po/app1-2741898079-66lz0   0/1       ContainerCreating   0          40s
-    po/app1-2741898079-jwfmk   1/1       Running             0          40s
-    po/app2-2889674625-wxs08   0/1       ContainerCreating   0          40s
-    po/app3-3000954754-fbqtz   0/1       ContainerCreating   0          40s
+    po/app1-3720119688-5lc9g   0/1       ContainerCreating   0          9s
+    po/app1-3720119688-n3gfh   0/1       ContainerCreating   0          9s
+    po/app2-1798985037-6q534   0/1       ContainerCreating   0          9s
+    po/app3-2097142386-pq1ff   1/1       Running             0          9s
 
     NAME               CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
-    svc/app1-service   10.0.0.40    <none>        80/TCP    40s
-    svc/kubernetes     10.0.0.1     <none>        443/TCP   5h
+    svc/app1-service   10.0.0.150   <none>        80/TCP    9s
+    svc/kubernetes     10.0.0.1     <none>        443/TCP   13m
 
 All of these pods will be represented in Cilium as `endpoints`. We can invoke the
 ``cilium`` tool inside the Cilium pod to list them:
@@ -158,6 +158,7 @@ All of these pods will be represented in Cilium as `endpoints`. We can invoke th
     $ kubectl -n kube-system get pods -l k8s-app=cilium
     NAME           READY     STATUS    RESTARTS   AGE
     cilium-wjb9t   1/1       Running   0          17m
+
     $ kubectl -n kube-system exec cilium-wjb9t cilium endpoint list
     ENDPOINT   POLICY        IDENTITY   LABELS (source:key[=value])               IPv6                   IPv4            STATUS
                ENFORCEMENT
@@ -182,7 +183,7 @@ policies.  Instead, you can use the labels assigned to the VM to define
 security policies, which are automatically applied to any container with that
 label, no matter where or when it is run within a container cluster.
 
-We'll start with a simple example where allow *app2* to reach *app1* on port 80, but
+We'll start with a simple example where we allow *app2* to reach *app1* on port 80, but
 disallow the same connectivity from *app3* to *app1*.
 This is a simple policy that filters only on IP protocol (network layer
 3) and TCP protocol (network layer 4), so it is often referred to as an L3/L4
@@ -202,9 +203,11 @@ We can achieve that with the following Kubernetes NetworkPolicy:
 ::
 
     kind: NetworkPolicy
-    apiVersion: extensions/v1beta1
+    apiVersion: networking.k8s.io/v1
+    #for k8s <1.7 use:
+    #apiVersion: extensions/v1beta1
     metadata:
-      name: access-app1
+      name: access-backend
     spec:
       podSelector:
         matchLabels:
@@ -215,8 +218,8 @@ We can achieve that with the following Kubernetes NetworkPolicy:
             matchLabels:
               id: app2
         ports:
-        - protocol: tcp
-          port: 80
+        - port: 80
+          protocol: TCP
 
 Kubernetes NetworkPolicies match on pod labels using "podSelector" to
 identify the sources and destinations to which the policy applies.
@@ -225,9 +228,9 @@ on TCP port 80.
 
 To apply this L3/L4 policy, run:
 
-::
+.. parsed-literal::
 
-    $ kubectl create -f https://raw.githubusercontent.com/cilium/cilium/master/examples/minikube/l3_l4_policy.yaml
+    $ kubectl create -f \ |SCM_WEB|\/examples/minikube/l3_l4_policy.yaml
 
 If we run ``cilium endpoint list`` again we will see that the pods with the
 label ``id=app1`` now have policy enforcement enabled.
@@ -280,11 +283,12 @@ You can observe the policy via ``kubectl``
     $ kubectl get networkpolicies
     NAME             POD-SELECTOR   AGE
     access-backend   id=app1        2m
+
     $ kubectl describe networkpolicies access-backend
-    Name:		access-backend
-    Namespace:	default
-    Labels:		<none>
-    Annotations:	<none>
+    Name:           access-backend
+    Namespace:      default
+    Labels:         <none>
+    Annotations:    <none>
 
 
 Step 5:  Apply and Test HTTP-aware L7 Policy
@@ -331,7 +335,9 @@ API call, but disallowing all other calls (including GET /private).
 
 ::
 
-    apiVersion: "cilium.io/v1"
+    apiVersion: "cilium.io/v2"
+    #for k8s <1.7 use:
+    #apiVersion: "cilium.io/v1"
     kind: CiliumNetworkPolicy
     description: "L7 policy for getting started using Kubernetes guide"
     metadata:
@@ -349,15 +355,15 @@ API call, but disallowing all other calls (including GET /private).
           - port: "80"
             protocol: TCP
           rules:
-            HTTP:
+            http:
             - method: "GET"
               path: "/public"
 
 Create an L7-aware policy to protect *app1* using:
 
-::
+.. parsed-literal::
 
-  $ kubectl create -f https://raw.githubusercontent.com/cilium/cilium/master/examples/minikube/l3_l4_l7_policy.yaml
+  $ kubectl create -f \ |SCM_WEB|\/examples/minikube/l3_l4_l7_policy.yaml
 
 
 .. note:: If this step is failing with an error complaining about version
@@ -388,53 +394,103 @@ You can observe the L7 policy via ``kubectl``:
 ::
 
     $ kubectl get ciliumnetworkpolicies
-    NAME      KIND                               DESCRIPTION
-    rule1     CiliumNetworkPolicy.v2.cilium.io   L7 policy for getting started using Kubernetes guide
+    NAME      KIND
+    rule1     CiliumNetworkPolicy.v2.cilium.io
+
     $ kubectl describe networkpolicies access-backend
-    Name:		access-backend
-    Namespace:	default
-    Labels:		<none>
-    Annotations:	<none>
+    Name:           access-backend
+    Namespace:      default
+    Labels:         <none>
+    Annotations:    <none>
+
     $ kubectl describe ciliumnetworkpolicies rule1
-    Name:		rule1
-    Namespace:	default
-    Labels:		<none>
-    Annotations:	<none>
-    API Version:	cilium.io/v2
-    Description:	L7 policy for getting started using Kubernetes guide
-    Kind:		CiliumNetworkPolicy
+    Name:           rule1
+    Namespace:      default
+    Labels:         <none>
+    Annotations:    <none>
+    API Version:    cilium.io/v2
+    Kind:           CiliumNetworkPolicy
     Metadata:
-      Cluster Name:				
-      Creation Timestamp:			2017-08-14T17:52:51Z
-      Deletion Grace Period Seconds:	<nil>
-      Deletion Timestamp:			<nil>
-      Resource Version:			94966
-      Self Link:				/apis/cilium.io/v2/namespaces/default/ciliumnetworkpolicies/rule1
-      UID:					6491cbe9-8119-11e7-8dcd-080027babb71
+      Cluster Name:
+      Creation Timestamp:   2017-10-05T22:03:07Z
+      Generation:           0
+      Resource Version:     1261
+      Self Link:            /apis/cilium.io/v2/namespaces/default/ciliumnetworkpolicies/rule1
+      UID:                  f81add19-aa18-11e7-a03b-080027d30ebc
     Spec:
       Endpoint Selector:
         Match Labels:
-          Id:	app1
+          Any : Id: app1
       Ingress:
         From Endpoints:
           Match Labels:
-            Id:	app2
+            Any : Id:       app2
         To Ports:
           Ports:
-            Port:		80
-            Protocol:	TCP
+            Port:           80
+            Protocol:       TCP
           Rules:
             Http:
-              Method:	GET
-              Path:		/public
-    Events:			<none>
+              Method:       GET
+              Path:         /public
+    Status:
+      Nodes:
+        Minikube:
+          Last Updated:     2017-10-05T22:07:56.240195037Z
+          Ok:               true
+    Events:                 <none>
 
 and ``cilium`` CLI:
 
 ::
 
-    $ kubectl exec cilium-<xxx> -n kube-system cilium policy get
+    $ kubectl exec cilium-wjb9t -n kube-system cilium policy get
     [
+      {
+        "endpointSelector": {
+          "matchLabels": {
+            "any:id": "app1",
+            "k8s:io.kubernetes.pod.namespace": "default"
+          }
+        },
+        "ingress": [
+          {
+            "fromEndpoints": [
+              {
+                "matchLabels": {
+                  "any:id": "app2",
+                  "k8s:io.kubernetes.pod.namespace": "default"
+                }
+              }
+            ],
+            "toPorts": [
+              {
+                "ports": [
+                  {
+                    "port": "80",
+                    "protocol": "TCP"
+                  }
+                ],
+                "rules": {
+                  "http": [
+                    {
+                      "path": "/public",
+                      "method": "GET"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "labels": [
+          {
+            "key": "io.cilium.k8s-policy-name",
+            "value": "rule1",
+            "source": "unspec"
+          }
+        ]
+      },
       {
         "endpointSelector": {
           "matchLabels": {
@@ -443,7 +499,7 @@ and ``cilium`` CLI:
           }
         },
         "ingress": [
-          { 
+          {
             "fromEndpoints": [
               {
                 "matchLabels": {
@@ -471,55 +527,9 @@ and ``cilium`` CLI:
             "source": "unspec"
           }
         ]
-      },
-      {
-        "endpointSelector": {
-          "matchLabels": {
-            "any:id": "app1",
-            "k8s:io.kubernetes.pod.namespace": "default"
-          }
-        },
-        "ingress": [
-           {   
-            "fromEndpoints": [
-              {
-                "matchLabels": {
-                  "any:id": "app2",
-                  "k8s:io.kubernetes.pod.namespace": "default"
-                }  
-               }
-            ],
-            "toPorts": [
-              {   
-                "ports": [
-                  {
-                    "port": "80",
-                    "protocol": "TCP"
-                  }
-                ],
-                "rules": {
-                  "http": [
-                    {
-                      "path": "/public",
-                      "method": "GET"
-                    }  
-                  ]  
-                }
-              }
-            ]   
-          }
-        ],
-        "labels": [
-          {
-            "key": "io.cilium.k8s-policy-name",
-            "value": "rule1",
-            "source": "unspec"
-          }
-        ]
       }
     ]
-    Revision: 26
-
+    Revision: 4
 
 We hope you enjoyed the tutorial.  Feel free to play more with the setup, read
 the rest of the documentation, and reach out to us on the `Cilium
@@ -700,7 +710,7 @@ We can achieve that with the following Cilium policy:
                 {"matchLabels":{"id":"app2"}}
             ],
             "toPorts": [{
-                    "ports": [{"port": "80", "protocol": "tcp"}]
+                    "ports": [{"port": "80", "protocol": "TCP"}]
             }]
         }]
     }]
@@ -801,7 +811,7 @@ The following Cilium policy file achieves this goal:
                 {"matchLabels":{"id":"app2"}}
             ],
             "toPorts": [{
-                "ports": [{"port": "80", "protocol": "tcp"}],
+                "ports": [{"port": "80", "protocol": "TCP"}],
                 "rules": {
                     "HTTP": [{
                         "method": "GET",
@@ -1078,7 +1088,7 @@ Apply an L3/L4 policy only allowing the *goodclient* to access the *web-server*.
                 {"matchLabels":{"id":"goodclient"}}
             ],
             "toPorts": [{
-                    "ports": [{"port": "8181", "protocol": "tcp"}]
+                    "ports": [{"port": "8181", "protocol": "TCP"}]
             }]
         }]
     }]
@@ -1152,7 +1162,7 @@ Now, apply an L7 Policy that only allows access for the *goodclient* to the */pu
                 {"matchLabels":{"id":"goodclient"}}
             ],
             "toPorts": [{
-                "ports": [{"port": "8181", "protocol": "tcp"}],
+                "ports": [{"port": "8181", "protocol": "TCP"}],
                 "rules": {
                     "HTTP": [{
                         "method": "GET",

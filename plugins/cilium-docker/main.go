@@ -16,12 +16,13 @@ package main
 
 import (
 	"os"
-	"path"
+	"path/filepath"
 
 	"github.com/cilium/cilium/common"
+	"github.com/cilium/cilium/pkg/logfields"
 	"github.com/cilium/cilium/plugins/cilium-docker/driver"
 
-	"github.com/Sirupsen/logrus"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
@@ -49,9 +50,9 @@ connected to a Docker network of type "cilium".`,
 `,
 	Run: func(cmd *cobra.Command, args []string) {
 		if d, err := driver.NewDriver(ciliumAPI); err != nil {
-			log.Fatalf("Unable to create cilium-net driver: %s", err)
+			log.WithError(err).Fatal("Unable to create cilium-net driver")
 		} else {
-			log.Infof("Listening for events from Docker on %s", driverSock)
+			log.WithField(logfields.Path, driverSock).Info("Listening for events from Docker")
 			if err := d.Listen(driverSock); err != nil {
 				log.Fatal(err)
 			}
@@ -84,14 +85,14 @@ func initConfig() {
 
 	common.RequireRootPrivilege("cilium-docker")
 
-	driverSock = path.Join(pluginPath, "cilium.sock")
+	driverSock = filepath.Join(pluginPath, "cilium.sock")
 
 	if err := os.MkdirAll(pluginPath, 0755); err != nil && !os.IsExist(err) {
-		log.Fatalf("Could not create net plugin path directory: %s", err)
+		log.WithError(err).Fatal("Could not create net plugin path directory")
 	}
 
 	if _, err := os.Stat(driverSock); err == nil {
-		log.Debugf("socket file %s already exists, unlinking the old file handle.", driverSock)
+		log.WithField(logfields.Path, driverSock).Debug("socket file already exists, unlinking the old file handle.")
 		os.RemoveAll(driverSock)
 	}
 }

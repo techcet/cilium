@@ -23,7 +23,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/cilium/cilium/api/v1/models"
@@ -31,6 +30,7 @@ import (
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
 	pkgLabels "github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/maps/cidrmap"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
@@ -39,7 +39,7 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 var (
@@ -62,6 +62,7 @@ const (
 	OptionConntrack           = "Conntrack"
 	OptionDebug               = "Debug"
 	OptionDropNotify          = "DropNotification"
+	OptionTraceNotify         = "TraceNotification"
 	OptionNAT46               = "NAT46"
 	OptionPolicy              = "Policy"
 	AlwaysEnforce             = "always"
@@ -111,6 +112,11 @@ var (
 		Description: "Enable drop notifications",
 	}
 
+	OptionSpecTraceNotify = option.Option{
+		Define:      "TRACE_NOTIFY",
+		Description: "Enable trace notifications",
+	}
+
 	OptionSpecNAT46 = option.Option{
 		Define:      "ENABLE_NAT46",
 		Description: "Enable automatic NAT46 translation",
@@ -118,9 +124,8 @@ var (
 		Verify: func(key string, val bool) error {
 			if !IPv4Enabled {
 				return fmt.Errorf("NAT46 requires IPv4 to be enabled")
-			} else {
-				return nil
 			}
+			return nil
 		},
 	}
 
@@ -135,6 +140,7 @@ var (
 		OptionConntrack:           &OptionSpecConntrack,
 		OptionDebug:               &OptionSpecDebug,
 		OptionDropNotify:          &OptionSpecDropNotify,
+		OptionTraceNotify:         &OptionSpecTraceNotify,
 		OptionNAT46:               &OptionSpecNAT46,
 		OptionPolicy:              &OptionSpecPolicy,
 	}
@@ -154,13 +160,20 @@ func init() {
 const (
 	// StateCreating is used to set the endpoint is being created.
 	StateCreating = string(models.EndpointStateCreating)
+
+	// StateDisconnecting indicates that the endpoint is being disconnected
+	StateDisconnecting = string(models.EndpointStateDisconnecting)
+
 	// StateDisconnected is used to set the endpoint is disconnected.
 	StateDisconnected = string(models.EndpointStateDisconnected)
+
 	// StateWaitingForIdentity is used to set if the endpoint is waiting
 	// for an identity from the KVStore.
 	StateWaitingForIdentity = string(models.EndpointStateWaitingForIdentity)
+
 	// StateReady specifies if the endpoint is read to be used.
 	StateReady = string(models.EndpointStateReady)
+
 	// StateRegenerating specifies when the endpoint is being regenerated.
 	StateRegenerating = string(models.EndpointStateRegenerating)
 
@@ -183,7 +196,7 @@ type Endpoint struct {
 	ID uint16
 
 	// Mutex protects write operations to this endpoint structure
-	Mutex sync.RWMutex
+	Mutex lock.RWMutex
 
 	// ContainerName is the name given to the endpoint by the container runtime
 	ContainerName string
@@ -272,12 +285,19 @@ type Endpoint struct {
 	// by Kubernetes
 	PodName string
 
-	// PolicyRevision is the policy revision this endpoint is currently on
-	PolicyRevision uint64 `json:"-"`
+	// policyRevision is the policy revision this endpoint is currently on
+	policyRevision uint64
 
-	// NextPolicyRevision is the policy revision that the endpoint has
+	// nextPolicyRevision is the policy revision that the endpoint has
 	// updated to and that will become effective with the next regenerate
-	NextPolicyRevision uint64 `json:"-"`
+	nextPolicyRevision uint64
+
+	// BuildMutex synchronizes builds of individual endpoints and locks out
+	// deletion during builds
+	//
+	// FIXME: Mark private once endpoint deletion can be moved into
+	// `pkg/endpoint`
+	BuildMutex lock.Mutex
 }
 
 // NewEndpointFromChangeModel creates a new endpoint from a request
@@ -341,12 +361,12 @@ func NewEndpointFromChangeModel(base *models.EndpointChangeRequest, l pkgLabels.
 	return ep, nil
 }
 
-func (e *Endpoint) GetModel() *models.Endpoint {
+// GetModelRLocked returns the API model of endpoint e.
+// e.Mutex must be RLocked.
+func (e *Endpoint) GetModelRLocked() *models.Endpoint {
 	if e == nil {
 		return nil
 	}
-	e.Mutex.RLock()
-	defer e.Mutex.RUnlock()
 
 	currentState := models.EndpointState(e.State)
 	if currentState == models.EndpointStateReady && e.Status.CurrentStatus() != OK {
@@ -376,13 +396,24 @@ func (e *Endpoint) GetModel() *models.Endpoint {
 		State:          currentState, // TODO: Validate
 		Policy:         e.GetPolicyModel(),
 		PolicyEnabled:  &policyEnabled,
-		PolicyRevision: int64(e.PolicyRevision),
+		PolicyRevision: int64(e.policyRevision),
 		Status:         e.Status.GetModel(),
 		Addressing: &models.EndpointAddressing{
 			IPV4: e.IPv4.String(),
 			IPV6: e.IPv6.String(),
 		},
 	}
+}
+
+// GetModel returns the API model of endpoint e.
+func (e *Endpoint) GetModel() *models.Endpoint {
+	if e == nil {
+		return nil
+	}
+	e.Mutex.RLock()
+	defer e.Mutex.RUnlock()
+
+	return e.GetModelRLocked()
 }
 
 // GetPolicyModel returns the endpoint's policy as an API model.
@@ -515,7 +546,7 @@ type EndpointStatus struct {
 	// available position to write a new log message.
 	Index int `json:"index"`
 	// indexMU is the Mutex for the CurrentStatus and Log RW operations.
-	indexMU sync.RWMutex
+	indexMU lock.RWMutex
 }
 
 func NewEndpointStatus() *EndpointStatus {
@@ -688,6 +719,11 @@ func (e *Endpoint) GetIdentity() policy.NumericIdentity {
 	}
 
 	return policy.InvalidIdentity
+}
+
+// ResolveIdentity fetches Consumable from consumable cache, using security identity as key.
+func (e *Endpoint) ResolveIdentity(srcIdentity policy.NumericIdentity) *policy.Identity {
+	return e.Consumable.ResolveIdentityFromCache(srcIdentity)
 }
 
 func (e *Endpoint) directoryPath() string {
@@ -951,20 +987,20 @@ func (e *Endpoint) CallsMapPathLocked() string {
 	return CallsMapPath(int(e.ID))
 }
 
+// Ct6MapPath returns the path to IPv6 connection tracking map of endpoint.
 func Ct6MapPath(id int) string {
 	return bpf.MapPath(ctmap.MapName6 + strconv.Itoa(id))
 }
 
-// Ct6MapPath returns the path to IPv6 connection tracking map of endpoint.
 func (e *Endpoint) Ct6MapPathLocked() string {
 	return Ct6MapPath(int(e.ID))
 }
 
+// Ct4MapPath returns the path to IPv4 connection tracking map of endpoint.
 func Ct4MapPath(id int) string {
 	return bpf.MapPath(ctmap.MapName4 + strconv.Itoa(id))
 }
 
-// Ct4MapPath returns the path to IPv4 connection tracking map of endpoint.
 func (e *Endpoint) Ct4MapPathLocked() string {
 	return Ct4MapPath(int(e.ID))
 }
@@ -1056,16 +1092,21 @@ func (e *Endpoint) HasLabels(l pkgLabels.Labels) bool {
 // UpdateOrchInformationLabels updates orchestration labels for the endpoint which
 // are not used in determining the security identity for the endpoint.
 func (e *Endpoint) UpdateOrchInformationLabels(l pkgLabels.Labels) {
+	e.Mutex.Lock()
 	for k, v := range l {
 		tmp := v.DeepCopy()
 		log.Debugf("Assigning orchestration information label %+v", tmp)
 		e.OpLabels.OrchestrationInfo[k] = tmp
 	}
+	e.Mutex.Unlock()
 }
 
 // UpdateOrchIdentityLabels updates orchestration labels for the endpoint which
 // are used in determining the security identity for the endpoint.
+//
+// Note: Must be called with endpoint.Mutex held!
 func (e *Endpoint) UpdateOrchIdentityLabels(l pkgLabels.Labels) bool {
+	e.Mutex.Lock()
 	changed := false
 
 	e.OpLabels.OrchestrationIdentity.MarkAllForDeletion()
@@ -1089,6 +1130,7 @@ func (e *Endpoint) UpdateOrchIdentityLabels(l pkgLabels.Labels) bool {
 	if e.OpLabels.OrchestrationIdentity.DeleteMarked() || e.OpLabels.Disabled.DeleteMarked() {
 		changed = true
 	}
+	e.Mutex.Unlock()
 
 	return changed
 }
@@ -1096,7 +1138,6 @@ func (e *Endpoint) UpdateOrchIdentityLabels(l pkgLabels.Labels) bool {
 // LeaveLocked removes the endpoint's directory from the system. Must be called
 // with Endpoint's mutex locked.
 func (e *Endpoint) LeaveLocked(owner Owner) {
-	e.State = StateDisconnected
 	owner.RemoveFromEndpointQueue(uint64(e.ID))
 	if c := e.Consumable; c != nil {
 		c.Mutex.RLock()
@@ -1117,6 +1158,7 @@ func (e *Endpoint) LeaveLocked(owner Owner) {
 	e.L3Maps.Close()
 
 	e.removeDirectory()
+	e.State = StateDisconnected
 }
 
 func (e *Endpoint) removeDirectory() {
@@ -1153,4 +1195,100 @@ func (e *Endpoint) RegenerateIfReady(owner Owner) error {
 			" For more info run: 'cilium endpoint get %d'", e.ID)
 	}
 	return nil
+}
+
+// SetContainerName modifies the endpoint's container name
+func (e *Endpoint) SetContainerName(name string) {
+	e.Mutex.Lock()
+	e.ContainerName = name
+	e.Mutex.Unlock()
+}
+
+// SetPodName modifies the endpoint's pod name
+func (e *Endpoint) SetPodName(name string) {
+	e.Mutex.Lock()
+	e.PodName = name
+	e.Mutex.Unlock()
+}
+
+// SetContainerID modifies the endpoint's container ID
+func (e *Endpoint) SetContainerID(id string) {
+	e.Mutex.Lock()
+	e.DockerID = id
+	e.Mutex.Unlock()
+}
+
+// GetContainerID returns the endpoint's container ID
+func (e *Endpoint) GetContainerID() string {
+	e.Mutex.RLock()
+	id := e.DockerID
+	e.Mutex.RUnlock()
+	return id
+}
+
+// GetShortContainerID returns the endpoint's shortened container ID
+func (e *Endpoint) GetShortContainerID() string {
+	return e.GetContainerID()[:10]
+}
+
+// SetDockerEndpointID modifies the endpoint's Docker Endpoint ID
+func (e *Endpoint) SetDockerEndpointID(id string) {
+	e.Mutex.Lock()
+	e.DockerEndpointID = id
+	e.Mutex.Unlock()
+}
+
+// SetDockerNetworkID modifies the endpoint's Docker Endpoint ID
+func (e *Endpoint) SetDockerNetworkID(id string) {
+	e.Mutex.Lock()
+	e.DockerNetworkID = id
+	e.Mutex.Unlock()
+}
+
+// GetDockerNetworkID returns the endpoint's Docker Endpoint ID
+func (e *Endpoint) GetDockerNetworkID() string {
+	e.Mutex.RLock()
+	id := e.DockerNetworkID
+	e.Mutex.RUnlock()
+
+	return id
+}
+
+// GetState returns the endpoint's state
+// endpoint.Mutex may only be RLock()ed
+func (e *Endpoint) GetState() string {
+	e.Mutex.RLock()
+	defer e.Mutex.RUnlock()
+	return e.State
+}
+
+// SetState modifies the endpoint's state
+// endpoint.Mutex may not be held
+func (e *Endpoint) SetState(state string) {
+	e.Mutex.Lock()
+	e.State = state
+	e.Mutex.Unlock()
+}
+
+// bumpPolicyRevision marks the endpoint to be running the next scheduled
+// policy revision as setup by e.regenerate(). endpoint.Mutex may not be held
+func (e *Endpoint) bumpPolicyRevision() {
+	e.Mutex.Lock()
+	e.policyRevision = e.nextPolicyRevision
+	e.Mutex.Unlock()
+}
+
+// IsDisconnecting returns true if the endpoint is being disconnected or
+// already disconnected
+// endpoint.Mutex may only be RLock()ed
+func (e *Endpoint) IsDisconnecting() bool {
+	e.Mutex.RLock()
+	defer e.Mutex.RUnlock()
+	return e.IsDisconnectingLocked()
+}
+
+// IsDisconnectingLocked is identical to IsDisconnecting but with the endpoint
+// lock held for reading or writing
+func (e *Endpoint) IsDisconnectingLocked() bool {
+	return e.State == StateDisconnected || e.State == StateDisconnecting
 }

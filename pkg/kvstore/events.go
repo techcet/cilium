@@ -17,10 +17,10 @@ package kvstore
 import (
 	"sync"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
-// EventType defines the type of watch event that occured
+// EventType defines the type of watch event that occurred
 type EventType int
 
 const (
@@ -95,7 +95,7 @@ func watch(name, prefix string, chanSize int, list bool) *Watcher {
 	log.WithFields(log.Fields{
 		fieldWatcher:      w,
 		fieldListAndWatch: list,
-	}).Debugf("Starting watcher...")
+	}).Debug("Starting watcher...")
 
 	go func() {
 		// Signal termination of watcher routine
@@ -139,9 +139,7 @@ func (w *Watcher) Stop() {
 
 	close(w.Events)
 
-	log.WithFields(log.Fields{
-		fieldWatcher: w,
-	}).Debugf("Stopped watcher...")
+	log.WithField(fieldWatcher, w).Debug("Stopped watcher...")
 
 	w.stopped = true
 }

@@ -20,10 +20,10 @@ import (
 
 	e "github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/policy"
 
 	. "gopkg.in/check.v1"
-	"sync"
 )
 
 // Hook up gocheck into the "go test" runner.
@@ -35,11 +35,9 @@ type DaemonSuite struct {
 	// Owners interface mock
 	OnTracingEnabled                  func() bool
 	OnDryModeEnabled                  func() bool
-	OnEnablePolicyEnforcement         func() bool
 	OnEnableEndpointPolicyEnforcement func(e *e.Endpoint) bool
 	OnPolicyEnforcement               func() string
 	OnAlwaysAllowLocalhost            func() bool
-	OnGetConsumableCache              func() *policy.ConsumableCache
 	OnGetCachedLabelList              func(id policy.NumericIdentity) (labels.LabelArray, error)
 	OnGetPolicyRepository             func() *policy.Repository
 	OnGetCachedMaxLabelID             func() (policy.NumericIdentity, error)
@@ -51,7 +49,7 @@ type DaemonSuite struct {
 	OnRemoveFromEndpointQueue         func(epID uint64)
 	OnDebugEnabled                    func() bool
 	OnAnnotateEndpoint                func(e *e.Endpoint, annotationKey, annotationValue string)
-	OnGetCompilationLock              func() *sync.RWMutex
+	OnGetCompilationLock              func() *lock.RWMutex
 }
 
 var _ = Suite(&DaemonSuite{})
@@ -83,13 +81,6 @@ func (ds *DaemonSuite) AnnotateEndpoint(e *e.Endpoint, annotationKey, annotation
 
 }
 
-func (ds *DaemonSuite) EnablePolicyEnforcement() bool {
-	if ds.OnEnablePolicyEnforcement != nil {
-		return ds.OnEnablePolicyEnforcement()
-	}
-	panic("EnablePolicyEnforcement should not have been called")
-}
-
 func (ds *DaemonSuite) EnableEndpointPolicyEnforcement(e *e.Endpoint) bool {
 	if ds.OnEnableEndpointPolicyEnforcement != nil {
 		return ds.OnEnableEndpointPolicyEnforcement(e)
@@ -109,13 +100,6 @@ func (ds *DaemonSuite) AlwaysAllowLocalhost() bool {
 		return ds.OnAlwaysAllowLocalhost()
 	}
 	panic("AlwaysAllowLocalhost should not have been called")
-}
-
-func (ds *DaemonSuite) GetConsumableCache() *policy.ConsumableCache {
-	if ds.OnGetConsumableCache != nil {
-		return ds.OnGetConsumableCache()
-	}
-	panic("GetConsumableCache should not have been called")
 }
 
 func (ds *DaemonSuite) GetCachedLabelList(id policy.NumericIdentity) (labels.LabelArray, error) {
@@ -190,7 +174,7 @@ func (ds *DaemonSuite) DebugEnabled() bool {
 	panic("DebugEnabled should not have been called")
 }
 
-func (ds *DaemonSuite) GetCompilationLock() *sync.RWMutex {
+func (ds *DaemonSuite) GetCompilationLock() *lock.RWMutex {
 	if ds.OnGetCompilationLock != nil {
 		return ds.OnGetCompilationLock()
 	}

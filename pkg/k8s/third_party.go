@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 // CiliumNetworkPolicy is a Kubernetes third-party resource with an extended version
@@ -146,6 +146,11 @@ func parseToCilium(namespace, name string, r *api.Rule) *api.Rule {
 				copy(retRule.Ingress[i].FromCIDR, ing.FromCIDR)
 			}
 
+			if ing.FromCIDRSet != nil {
+				retRule.Ingress[i].FromCIDRSet = make([]api.CIDRRule, len(ing.FromCIDRSet))
+				copy(retRule.Ingress[i].FromCIDRSet, ing.FromCIDRSet)
+			}
+
 			if ing.FromRequires != nil {
 				retRule.Ingress[i].FromRequires = make([]api.EndpointSelector, len(ing.FromRequires))
 				for j, ep := range ing.FromRequires {
@@ -193,7 +198,7 @@ func (r *CiliumNetworkPolicy) Parse() (api.Rules, error) {
 	retRules := api.Rules{}
 
 	if r.Spec != nil {
-		if err := r.Spec.Validate(); err != nil {
+		if err := r.Spec.Sanitize(); err != nil {
 			return nil, fmt.Errorf("Invalid spec: %s", err)
 
 		}
@@ -202,7 +207,7 @@ func (r *CiliumNetworkPolicy) Parse() (api.Rules, error) {
 	}
 	if r.Specs != nil {
 		for _, rule := range r.Specs {
-			if err := rule.Validate(); err != nil {
+			if err := rule.Sanitize(); err != nil {
 				return nil, fmt.Errorf("Invalid specs: %s", err)
 
 			}

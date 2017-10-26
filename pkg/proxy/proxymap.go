@@ -35,6 +35,7 @@ type Proxy4Key struct {
 	Pad     uint8
 }
 
+// HostPort returns host port for provided proxy key
 func (k *Proxy4Key) HostPort() string {
 	portStr := strconv.FormatUint(uint64(k.SPort), 10)
 	return net.JoinHostPort(k.SAddr.IP().String(), portStr)
@@ -47,9 +48,9 @@ type Proxy4Value struct {
 	SourceIdentity uint32
 }
 
-func (p *Proxy4Value) HostPort() string {
-	portStr := strconv.FormatUint(uint64(p.OrigDPort), 10)
-	return net.JoinHostPort(p.OrigDAddr.IP().String(), portStr)
+func (v *Proxy4Value) HostPort() string {
+	portStr := strconv.FormatUint(uint64(v.OrigDPort), 10)
+	return net.JoinHostPort(v.OrigDAddr.IP().String(), portStr)
 }
 
 var (
@@ -89,8 +90,8 @@ func (v *Proxy4Value) GetValuePtr() unsafe.Pointer {
 }
 
 // ToNetwork converts Proxy4Value to network byte order.
-func (p *Proxy4Value) ToNetwork() *Proxy4Value {
-	n := *p
+func (v *Proxy4Value) ToNetwork() *Proxy4Value {
+	n := *v
 	n.OrigDPort = byteorder.HostToNetwork(n.OrigDPort).(uint16)
 	return &n
 }
@@ -117,11 +118,11 @@ func proxy4DumpParser(key []byte, value []byte) (bpf.MapKey, bpf.MapValue, error
 	v := Proxy4Value{}
 
 	if err := binary.Read(keyBuf, byteorder.Native, &k); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert key: %s\n", err)
+		return nil, nil, fmt.Errorf("Unable to convert key: %s", err)
 	}
 
 	if err := binary.Read(valueBuf, byteorder.Native, &v); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert key: %s\n", err)
+		return nil, nil, fmt.Errorf("Unable to convert key: %s", err)
 	}
 
 	return k.ToNetwork(), v.ToNetwork(), nil

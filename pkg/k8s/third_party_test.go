@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cilium/cilium/pkg/comparator"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/policy/api"
 
@@ -53,7 +54,9 @@ var (
 						Rules: &api.L7Rules{HTTP: []api.PortRuleHTTP{{Path: "/public", Method: "GET"}}},
 					},
 				},
-				ToCIDR: []api.CIDR{"10.0.0.1"},
+			}, {
+				ToCIDR:    []api.CIDR{"10.0.0.1"},
+				ToCIDRSet: []api.CIDRRule{{Cidr: api.CIDR("10.0.0.0/8"), ExceptCIDRs: []api.CIDR{"10.96.0.0/12"}}},
 			},
 		},
 	}
@@ -86,7 +89,10 @@ var (
 						Rules: &api.L7Rules{HTTP: []api.PortRuleHTTP{{Path: "/public", Method: "GET"}}},
 					},
 				},
-				ToCIDR: []api.CIDR{"10.0.0.1"},
+			},
+			{
+				ToCIDR:    []api.CIDR{"10.0.0.1"},
+				ToCIDRSet: []api.CIDRRule{{Cidr: api.CIDR("10.0.0.0/8"), ExceptCIDRs: []api.CIDR{"10.96.0.0/12"}}},
 			},
 		},
 		Labels: labels.ParseLabelArray(fmt.Sprintf("%s=%s", PolicyLabelName, "rule1")),
@@ -160,10 +166,19 @@ var (
                             ]
                         }
                     }
-                ],
+                ]
+            },{
                 "toCIDR": [
                     "10.0.0.1"
-                ]
+                ],
+				"toCIDRSet": [
+					{
+						"cidr": "10.0.0.0/8",
+						"except": [
+							"10.96.0.0/12"
+						]
+					}
+				]
             }
         ]
     }`)
@@ -185,7 +200,9 @@ var (
 func (s *K8sSuite) TestParseSpec(c *C) {
 
 	es := api.NewESFromLabels(labels.ParseSelectLabel("role=backend"))
-	es.MatchExpressions = []metav1.LabelSelectorRequirement{{Key: "any.role", Operator: "NotIn", Values: []string{"production"}}}
+	es.MatchExpressions = []metav1.LabelSelectorRequirement{
+		{Key: "any.role", Operator: "NotIn", Values: []string{"production"}},
+	}
 
 	apiRule.EndpointSelector = es
 
@@ -204,19 +221,19 @@ func (s *K8sSuite) TestParseSpec(c *C) {
 	rules, err := expectedPolicyRule.Parse()
 	c.Assert(err, IsNil)
 	c.Assert(len(rules), Equals, 1)
-	c.Assert(*rules[0], DeepEquals, expectedSpecRule)
+	c.Assert(*rules[0], comparator.DeepEquals, expectedSpecRule)
 
 	b, err := json.Marshal(expectedPolicyRule)
 	c.Assert(err, IsNil)
 	var expectedPolicyRuleUnmarshalled CiliumNetworkPolicy
 	err = json.Unmarshal(b, &expectedPolicyRuleUnmarshalled)
 	c.Assert(err, IsNil)
-	c.Assert(expectedPolicyRuleUnmarshalled, DeepEquals, *expectedPolicyRule)
+	c.Assert(expectedPolicyRuleUnmarshalled, comparator.DeepEquals, *expectedPolicyRule)
 
 	cnpl := CiliumNetworkPolicy{}
 	err = json.Unmarshal(ciliumRule, &cnpl)
 	c.Assert(err, IsNil)
-	c.Assert(cnpl, DeepEquals, *expectedPolicyRule)
+	c.Assert(cnpl, comparator.DeepEquals, *expectedPolicyRule)
 }
 
 func (s *K8sSuite) TestParseRules(c *C) {
@@ -242,17 +259,19 @@ func (s *K8sSuite) TestParseRules(c *C) {
 	rules, err := expectedPolicyRuleList.Parse()
 	c.Assert(err, IsNil)
 	c.Assert(len(rules), Equals, 2)
-	c.Assert(rules, DeepEquals, expectedSpecRules)
+	for i, rule := range rules {
+		c.Assert(rule, comparator.DeepEquals, expectedSpecRules[i])
+	}
 
 	b, err := json.Marshal(expectedPolicyRuleList)
 	c.Assert(err, IsNil)
 	var expectedPolicyRuleUnmarshalled CiliumNetworkPolicy
 	err = json.Unmarshal(b, &expectedPolicyRuleUnmarshalled)
 	c.Assert(err, IsNil)
-	c.Assert(expectedPolicyRuleUnmarshalled, DeepEquals, *expectedPolicyRuleList)
+	c.Assert(expectedPolicyRuleUnmarshalled, comparator.DeepEquals, *expectedPolicyRuleList)
 
 	cnpl := CiliumNetworkPolicy{}
 	err = json.Unmarshal(ciliumRuleList, &cnpl)
 	c.Assert(err, IsNil)
-	c.Assert(cnpl, DeepEquals, *expectedPolicyRuleList)
+	c.Assert(cnpl, comparator.DeepEquals, *expectedPolicyRuleList)
 }

@@ -26,6 +26,8 @@ IP6_SVC_RANGE=$9
 MODE=${10}
 # Only set if MODE = "direct" or "lb"
 NATIVE_DEV=${11}
+XDP_DEV=${12}
+XDP_MODE=${13}
 
 HOST_ID="host"
 WORLD_ID="world"
@@ -107,14 +109,14 @@ function move_local_rules_af()
 	# required to add the new local rule before deleting the old one as
 	# otherwise local addresses will not be reachable for a short period of
 	# time.
-	$IP rule list from all lookup local pref 100 | grep "lookup local" || {
+	$IP rule list | grep 100 | grep "lookup local" || {
 		$IP rule add from all lookup local pref 100
 	}
 	$IP rule del from all lookup local pref 0 2> /dev/null || true
 
 	# check if the move of the local table move was successful and restore
 	# it otherwise
-	if [ "$($IP rule list lookup local | wc -l)" -eq "0" ]; then
+	if [ "$($IP rule list | grep "lookup local" | wc -l)" -eq "0" ]; then
 		$IP rule add from all lookup local pref 0
 		$IP rule del from all lookup local pref 100
 		echo "Error: The kernel does not support moving the local table routing rule"
@@ -180,6 +182,23 @@ function bpf_compile()
 	      $EXTRA_OPTS						\
 	      -c $LIB/$IN -o - |					\
 	llc -march=bpf -mcpu=probe -filetype=$TYPE -o $OUT
+}
+
+function xdp_load()
+{
+	DEV=$1
+	MODE=$2
+	OPTS=$3
+	IN=$4
+	OUT=$5
+	SEC=$6
+	CIDR_MAP=$7
+
+	bpf_compile $IN $OUT obj "$OPTS"
+
+	ip link set dev $DEV $MODE off
+	rm -f "/sys/fs/bpf/xdp/globals/$CIDR_MAP" 2> /dev/null || true
+	ip link set dev $DEV $MODE obj $OUT sec $SEC
 }
 
 function bpf_load()
@@ -252,12 +271,12 @@ fi
 
 if [[ "$IP4_HOST" != "<nil>" ]]; then
 	[ -n "$(ip -4 addr show to $IP4_HOST)" ] || {
-		ip -4 addr add $IP4_HOST dev $HOST_DEV1
+		ip -4 addr add $IP4_HOST dev $HOST_DEV1 scope link
 	}
 fi
 
 ip addr del 169.254.254.1/32 dev $HOST_DEV1 2> /dev/null || true
-ip addr add 169.254.254.1/32 dev $HOST_DEV1
+ip addr add 169.254.254.1/32 dev $HOST_DEV1 scope link
 ip route del 169.254.254.0/24 dev $HOST_DEV1 2> /dev/null || true
 ip route add 169.254.254.0/24 dev $HOST_DEV1 scope link
 ip route del $IP4_RANGE 2> /dev/null || true
@@ -353,3 +372,9 @@ ID=$(cilium identity get $HOST_ID 2> /dev/null)
 CALLS_MAP="cilium_calls_netdev_ns_${ID}"
 OPTS="-DFROM_HOST -DFIXED_SRC_SECCTX=${ID} -DSECLABEL=${ID} -DPOLICY_MAP=cilium_policy_reserved_${ID}"
 bpf_load $HOST_DEV1 "$OPTS" "egress" bpf_netdev.c bpf_host.o from-netdev $CALLS_MAP
+
+if [ -n "$XDP_DEV" ]; then
+	CIDR_MAP="cilium_cidr_v*"
+	OPTS=""
+	xdp_load $XDP_DEV $XDP_MODE "$OPTS" bpf_xdp.c bpf_xdp.o from-netdev $CIDR_MAP
+fi

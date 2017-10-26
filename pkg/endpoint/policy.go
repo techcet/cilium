@@ -20,11 +20,13 @@ import (
 	"path/filepath"
 
 	"github.com/cilium/cilium/api/v1/models"
+	"github.com/cilium/cilium/pkg/logfields"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
+	"github.com/cilium/cilium/pkg/u8proto"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/cilium/cilium/common"
+	log "github.com/sirupsen/logrus"
 )
 
 func (e *Endpoint) checkEgressAccess(owner Owner, opts models.ConfigurationMap, dstID policy.NumericIdentity, opt string) {
@@ -44,7 +46,7 @@ func (e *Endpoint) checkEgressAccess(owner Owner, opts models.ConfigurationMap, 
 		return
 	}
 
-	switch owner.GetPolicyRepository().AllowsRLocked(&ctx) {
+	switch owner.GetPolicyRepository().AllowsLabelAccess(&ctx) {
 	case api.Allowed:
 		opts[opt] = "enabled"
 	case api.Denied:
@@ -54,7 +56,7 @@ func (e *Endpoint) checkEgressAccess(owner Owner, opts models.ConfigurationMap, 
 
 // allowConsumer must be called with global endpoint.Mutex held
 func (e *Endpoint) allowConsumer(owner Owner, id policy.NumericIdentity) {
-	cache := owner.GetConsumableCache()
+	cache := policy.GetConsumableCache()
 	if !e.Opts.IsEnabled(OptionConntrack) {
 		e.Consumable.AllowConsumerAndReverseLocked(cache, id)
 	} else {
@@ -77,7 +79,7 @@ func (e *Endpoint) evaluateConsumerSource(owner Owner, ctx *policy.SearchContext
 
 	log.Debugf("[%s] Evaluating context %+v", e.PolicyID(), ctx)
 
-	if owner.GetPolicyRepository().AllowsRLocked(ctx) == api.Allowed {
+	if owner.GetPolicyRepository().AllowsLabelAccess(ctx) == api.Allowed {
 		e.allowConsumer(owner, srcID)
 	}
 
@@ -116,7 +118,7 @@ func (e *Endpoint) cleanUnusedRedirects(owner Owner, oldMap policy.L4PolicyMap, 
 			}
 		}
 
-		if v.L7Parser != "" {
+		if v.IsRedirect() {
 			if err := owner.RemoveProxyRedirect(e, &v); err != nil {
 				log.Warningf("error while removing proxy: %s", err)
 			}
@@ -125,17 +127,113 @@ func (e *Endpoint) cleanUnusedRedirects(owner Owner, oldMap policy.L4PolicyMap, 
 	}
 }
 
+func getSecurityIdentities(owner Owner, selector *api.EndpointSelector) []policy.NumericIdentity {
+	identities := []policy.NumericIdentity{}
+	maxID, err := owner.GetCachedMaxLabelID()
+	if err != nil {
+		return identities
+	}
+	for idx := policy.MinimalNumericIdentity; idx < maxID; idx++ {
+		labels, err := owner.GetCachedLabelList(idx)
+		if err != nil {
+			log.Infof("L4 Policy label lookup failed: %s", err)
+		}
+
+		if labels != nil && selector.Matches(labels) {
+			log.Debugf("L4 Policy matches %v.", labels)
+			identities = append(identities, idx)
+		}
+	}
+
+	return identities
+}
+
+func (e *Endpoint) removeOldFilter(owner Owner, filter *policy.L4Filter) int {
+	port := uint16(filter.Port)
+	proto, err := u8proto.ParseProtocol(string(filter.Protocol))
+	if err != nil {
+		log.Warningf("Parse policy protocol failed: %s", err)
+		return 1
+	}
+
+	errors := 0
+	for _, sel := range filter.FromEndpoints {
+		for _, id := range getSecurityIdentities(owner, &sel) {
+			srcID := id.Uint32()
+			if err = e.PolicyMap.DeleteL4(srcID, port, uint8(proto)); err != nil {
+				log.Debugf("Delete old l4 policy failed: %s", err)
+			}
+		}
+	}
+
+	return errors
+}
+
+func (e *Endpoint) applyNewFilter(owner Owner, filter *policy.L4Filter) int {
+	port := uint16(filter.Port)
+	proto, err := u8proto.ParseProtocol(string(filter.Protocol))
+	if err != nil {
+		log.Warningf("Parse policy protocol failed: %s", err)
+		return 1
+	}
+
+	errors := 0
+	for _, sel := range filter.FromEndpoints {
+		for _, id := range getSecurityIdentities(owner, &sel) {
+			srcID := id.Uint32()
+			if e.PolicyMap.L4Exists(srcID, port, uint8(proto)) {
+				log.Debugf("L4 filter exists: %+v", filter)
+				continue
+			}
+			if err = e.PolicyMap.AllowL4(srcID, port, uint8(proto)); err != nil {
+				log.Warningf("Update of l4 policy map failed: %s", err)
+				errors++
+			}
+		}
+	}
+
+	return errors
+}
+
+// Looks for mismatches between 'oldPolicy' and 'newPolicy', and fixes up
+// this Endpoint's BPF PolicyMap to reflect the new L3+L4 combined policy.
+func (e *Endpoint) applyL4PolicyLocked(owner Owner, oldPolicy *policy.L4Policy, newPolicy *policy.L4Policy) error {
+	errors := 0
+
+	if oldPolicy != nil {
+		for _, filter := range oldPolicy.Ingress {
+			errors = e.removeOldFilter(owner, &filter)
+		}
+	}
+
+	if newPolicy == nil {
+		return nil
+	}
+
+	for _, filter := range newPolicy.Ingress {
+		errors += e.applyNewFilter(owner, &filter)
+	}
+
+	if errors > 0 {
+		return fmt.Errorf("Some Label+L4 policy updates failed.")
+	}
+	return nil
+}
+
 // Must be called with global endpoint.Mutex held
 func (e *Endpoint) regenerateConsumable(owner Owner) (bool, error) {
 	c := e.Consumable
 
-	// Containers without a security label are not accessible
+	// Endpoints without a security label are not accessible
 	if c.ID == 0 {
-		log.Fatalf("[%s] BUG: Endpoints lacks identity", e.PolicyID())
+		log.WithFields(log.Fields{
+			logfields.EndpointID: e.StringID(),
+		}).Warning("Endpoint lacks identity, skipping policy calculation")
+
 		return false, nil
 	}
 
-	cache := owner.GetConsumableCache()
+	cache := policy.GetConsumableCache()
 
 	// Skip if policy for this consumable is already valid
 	//if c.Iteration == cache.Iteration {
@@ -161,8 +259,12 @@ func (e *Endpoint) regenerateConsumable(owner Owner) (bool, error) {
 
 	repo := owner.GetPolicyRepository()
 	repo.Mutex.Lock()
-	newL4policy := repo.ResolveL4Policy(&ctx)
+	newL4policy, err := repo.ResolveL4Policy(&ctx)
 	defer repo.Mutex.Unlock()
+
+	if err != nil {
+		return false, err
+	}
 
 	c.Mutex.Lock()
 	defer c.Mutex.Unlock()
@@ -176,10 +278,14 @@ func (e *Endpoint) regenerateConsumable(owner Owner) (bool, error) {
 		e.cleanUnusedRedirects(owner, c.L4Policy.Egress, newL4policy.Egress)
 	}
 
+	err = e.applyL4PolicyLocked(owner, c.L4Policy, newL4policy)
+	if err != nil {
+		return false, err
+	}
 	c.L4Policy = newL4policy
 
 	if newL4policy.HasRedirect() || owner.AlwaysAllowLocalhost() {
-		e.allowConsumer(owner, policy.ID_HOST)
+		e.allowConsumer(owner, policy.ReservedIdentityHost)
 	}
 
 	// Check access from reserved consumables first
@@ -271,8 +377,8 @@ func (e *Endpoint) regeneratePolicy(owner Owner) (bool, error) {
 	revision := repo.GetRevision()
 	e.Consumable.Mutex.RLock()
 
-	e.checkEgressAccess(owner, opts, policy.ID_HOST, OptionAllowToHost)
-	e.checkEgressAccess(owner, opts, policy.ID_WORLD, OptionAllowToWorld)
+	e.checkEgressAccess(owner, opts, policy.ReservedIdentityHost, OptionAllowToHost)
+	e.checkEgressAccess(owner, opts, policy.ReservedIdentityWorld, OptionAllowToWorld)
 
 	if e.Consumable != nil && e.Consumable.L4Policy.RequiresConntrack() {
 		opts[OptionConntrack] = "enabled"
@@ -305,9 +411,9 @@ func (e *Endpoint) regeneratePolicy(owner Owner) (bool, error) {
 	// already running the latest revision, otherwise we have to wait for
 	// the regeneration of the endpoint to complete.
 	if !policyChanged {
-		e.PolicyRevision = revision
+		e.policyRevision = revision
 	} else {
-		e.NextPolicyRevision = revision
+		e.nextPolicyRevision = revision
 	}
 
 	return policyChanged || optsChanged, nil
@@ -315,6 +421,22 @@ func (e *Endpoint) regeneratePolicy(owner Owner) (bool, error) {
 
 // Called with e.Mutex locked
 func (e *Endpoint) regenerate(owner Owner) error {
+	e.BuildMutex.Lock()
+	defer e.BuildMutex.Unlock()
+
+	// If endpoint was marked as disconnected then
+	// it won't be regenerated
+	if e.IsDisconnecting() {
+		log.WithFields(log.Fields{
+			logfields.EndpointID: e.StringID(),
+		}).Debug("Endpoint disconnected, skipping build")
+		return fmt.Errorf("endpoint disconnected, skipping build")
+	}
+
+	log.WithFields(log.Fields{
+		logfields.EndpointID: e.StringID(),
+	}).Debug("Regenerating endpoint...")
+
 	origDir := filepath.Join(owner.GetStateDir(), e.StringID())
 
 	// This is the temporary directory to store the generated headers,
@@ -327,14 +449,18 @@ func (e *Endpoint) regenerate(owner Owner) error {
 		return fmt.Errorf("Failed to create endpoint directory: %s", err)
 	}
 
+	e.Mutex.Lock()
+
 	if e.Consumable != nil {
 		// Regenerate policy and apply any options resulting in the
 		// policy change.
 		if _, err := e.regeneratePolicy(owner); err != nil {
+			e.Mutex.Unlock()
 			return fmt.Errorf("Unable to regenerate policy for '%s': %s",
 				e.PolicyMap.String(), err)
 		}
 	}
+	e.Mutex.Unlock()
 
 	if err := e.regenerateBPF(owner, tmpDir); err != nil {
 		os.RemoveAll(tmpDir)
@@ -353,9 +479,11 @@ func (e *Endpoint) regenerate(owner Owner) error {
 		os.RemoveAll(tmpDir)
 
 		if err2 := os.Rename(backupDir, origDir); err2 != nil {
-			log.Warningf("Restoring directory %s for endpoint "+
-				"%s failed, endpoint is in inconsistent state. Keeping stale directory.",
-				backupDir, e.String())
+			log.WithFields(log.Fields{
+				logfields.EndpointID: e.StringID(),
+			}).Warningf("Restoring directory %s for endpoint failed, endpoint "+
+				"is in inconsistent state. Keeping stale directory.",
+				backupDir)
 			return err2
 		}
 
@@ -364,7 +492,9 @@ func (e *Endpoint) regenerate(owner Owner) error {
 
 	os.RemoveAll(backupDir)
 
-	log.Infof("Regenerated program of endpoint %d", e.ID)
+	log.WithFields(log.Fields{
+		logfields.EndpointID: e.StringID(),
+	}).Info("Regenerated program of endpoint")
 
 	return nil
 }
@@ -377,49 +507,45 @@ func (e *Endpoint) Regenerate(owner Owner) <-chan bool {
 		Done:         make(chan bool),
 		ExternalDone: make(chan bool),
 	}
-	owner.QueueEndpointBuild(newReq)
-	go func(req *Request, e *Endpoint) {
+
+	go func(owner Owner, req *Request, e *Endpoint) {
 		buildSuccess := true
 
 		e.Mutex.Lock()
-		// If endpoint was marked as disconnected then
-		// it won't be regenerated
-		if e.State != StateDisconnected {
+		// If endpoint was marked as disconnected then it won't be
+		// regenerated
+		if !e.IsDisconnectingLocked() {
 			e.State = StateRegenerating
 		}
-		eID := e.ID
 		e.Mutex.Unlock()
+
+		// We should only queue the request after we use all the endpoint's
+		// lock/unlock. Otherwise this can get a deadlock if the endpoint is
+		// being deleted at the same time. More info PR-1777.
+		owner.QueueEndpointBuild(newReq)
 
 		isMyTurn, isMyTurnChanOK := <-req.MyTurn
 		if isMyTurnChanOK && isMyTurn {
-			log.Debugf("it is now [%d]'s turn to regenerate", eID)
-			e.Mutex.Lock()
-			var err error
+			log.WithFields(log.Fields{
+				logfields.EndpointID: e.StringID(),
+			}).Debug("Dequeued endpoint from build queue")
 
-			// If endpoint was marked as disconnected then
-			// it won't be regenerated
-			if e.State != StateDisconnected {
-				log.Debugf("Regenerating... [%d]", eID)
-				err = e.regenerate(owner)
-				e.State = StateReady
-			} else {
-				log.Debugf("Endpoint disconnected %d", e.ID)
-				err = fmt.Errorf("Endpoint disconnected")
-			}
-			e.Mutex.Unlock()
-
-			if err != nil {
+			if err := e.regenerate(owner); err != nil {
 				buildSuccess = false
 				e.LogStatus(BPF, Failure, err.Error())
 			} else {
 				buildSuccess = true
+				e.SetState(StateReady)
 				e.LogStatusOK(BPF, "Successfully regenerated endpoint program")
 			}
 
 			req.Done <- buildSuccess
 		} else {
 			buildSuccess = false
-			log.Debugf("My request was cancelled because I'm already in line [%d]", eID)
+
+			log.WithFields(log.Fields{
+				logfields.EndpointID: e.StringID(),
+			}).Debug("My request was cancelled because I'm already in line")
 		}
 		// The external listener can ignore the channel so we need to
 		// make sure we don't block
@@ -428,7 +554,7 @@ func (e *Endpoint) Regenerate(owner Owner) <-chan bool {
 		default:
 		}
 		close(req.ExternalDone)
-	}(newReq, e)
+	}(owner, newReq, e)
 	return newReq.ExternalDone
 }
 
@@ -444,6 +570,10 @@ func (e *Endpoint) TriggerPolicyUpdates(owner Owner) (bool, error) {
 		return false, nil
 	}
 
+	if err := e.l3PolicyValidation(); err != nil {
+		return false, err
+	}
+
 	changed, err := e.regeneratePolicy(owner)
 	if err != nil {
 		return changed, fmt.Errorf("%s: %s", e.StringID(), err)
@@ -454,10 +584,7 @@ func (e *Endpoint) TriggerPolicyUpdates(owner Owner) (bool, error) {
 
 func (e *Endpoint) SetIdentity(owner Owner, id *policy.Identity) {
 	repo := owner.GetPolicyRepository()
-	cache := owner.GetConsumableCache()
-
-	e.Mutex.Lock()
-	defer e.Mutex.Unlock()
+	cache := policy.GetConsumableCache()
 
 	repo.Mutex.Lock()
 	defer repo.Mutex.Unlock()
@@ -486,4 +613,19 @@ func (e *Endpoint) SetIdentity(owner Owner, id *policy.Identity) {
 	e.Consumable.Mutex.RLock()
 	log.Debugf("Set identity of EP %d to %d and consumable to %+v", e.ID, id, e.Consumable)
 	e.Consumable.Mutex.RUnlock()
+}
+
+// l3PolicyValidation prevents code generation failures due to the number of
+// CIDR matches
+func (e *Endpoint) l3PolicyValidation() error {
+	if e.L3Policy == nil {
+		return nil
+	}
+	if l := len(e.L3Policy.Egress.Map); l > api.MaxCIDREntries {
+		return fmt.Errorf("too many egress L3 entries %d/%d", l, api.MaxCIDREntries)
+	}
+	if l := len(e.L3Policy.Ingress.Map); l > api.MaxCIDREntries {
+		return fmt.Errorf("too many ingress L3 entries %d/%d", l, api.MaxCIDREntries)
+	}
+	return nil
 }

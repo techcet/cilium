@@ -24,10 +24,11 @@ import (
 
 	"github.com/cilium/cilium/common"
 	"github.com/cilium/cilium/common/types"
+	"github.com/cilium/cilium/pkg/logfields"
 	"github.com/cilium/cilium/pkg/policy"
 
-	log "github.com/Sirupsen/logrus"
 	consulAPI "github.com/hashicorp/consul/api"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -39,7 +40,7 @@ const (
 	MaxLockRetries = 10
 )
 
-// / ConsulOpts is the set of supported options for Consul configuration.
+// ConsulOpts is the set of supported options for Consul configuration.
 var ConsulOpts = map[string]bool{
 	cAddr: true,
 }
@@ -85,7 +86,7 @@ func newConsulClient(config *consulAPI.Config) (KVClient, error) {
 	}
 
 	if err != nil {
-		log.WithError(err).Fatalf("Unable to contact consul server")
+		log.WithError(err).Fatal("Unable to contact consul server")
 	}
 	cc := &ConsulClient{c}
 	// Clean-up old services path
@@ -204,7 +205,7 @@ func (c *ConsulClient) GetMaxID(key string, firstID uint32) (uint32, error) {
 		if k == nil {
 			// Something is really wrong
 			errMsg := "Unable to retrieve last free ID because the key is always empty\n"
-			log.Errorf(errMsg)
+			log.Error(errMsg)
 			return 0, fmt.Errorf(errMsg)
 		}
 	}
@@ -229,7 +230,7 @@ func (c *ConsulClient) SetMaxID(key string, firstID, maxID uint32) error {
 		if k == nil {
 			// Something is really wrong
 			errMsg := "Unable to setting ID because the key is always empty\n"
-			log.Errorf(errMsg)
+			log.Error(errMsg)
 			return fmt.Errorf(errMsg)
 		}
 	}
@@ -283,7 +284,7 @@ func (c *ConsulClient) GASNewSecLabelID(basePath string, baseID uint32, pI *poli
 				return false, err
 			}
 			if consulLabels.RefCount() == 0 {
-				log.Infof("Recycling ID %d", *incID)
+				log.WithField(logfields.Identity, *incID).Info("Recycling ID")
 				return false, setID2Label(*incID)
 			}
 		}
@@ -293,7 +294,7 @@ func (c *ConsulClient) GASNewSecLabelID(basePath string, baseID uint32, pI *poli
 			*incID = policy.MinimalNumericIdentity.Uint32()
 		}
 		if firstID == *incID {
-			return false, fmt.Errorf("reached maximum set of labels available.")
+			return false, fmt.Errorf("reached maximum set of labels available")
 		}
 		return true, nil
 	}
@@ -351,7 +352,7 @@ func (c *ConsulClient) GASNewL3n4AddrID(basePath string, baseID uint32, lAddrID 
 				return false, err
 			}
 			if consulL3n4AddrID.ID == 0 {
-				log.Infof("Recycling Service ID %d", baseID)
+				log.WithField(logfields.Identity, baseID).Info("Recycling Service ID")
 				return false, setIDtoL3n4Addr(*incID)
 			}
 		}
@@ -361,7 +362,7 @@ func (c *ConsulClient) GASNewL3n4AddrID(basePath string, baseID uint32, lAddrID 
 			*incID = common.FirstFreeServiceID
 		}
 		if firstID == *incID {
-			return false, fmt.Errorf("reached maximum set of serviceIDs available.")
+			return false, fmt.Errorf("reached maximum set of serviceIDs available")
 		}
 		// Only retry if we have incremented the service ID
 		return true, nil
@@ -402,7 +403,7 @@ func (c *ConsulClient) Watch(w *Watcher, list bool) {
 			log.WithFields(log.Fields{
 				fieldWatcher:      w,
 				fieldListAndWatch: list,
-			}).WithError(err).Debugf("Consul watcher failed, will retry")
+			}).WithError(err).Debug("Consul watcher failed, will retry")
 		}
 
 		if q != nil {
@@ -433,7 +434,7 @@ func (c *ConsulClient) Watch(w *Watcher, list bool) {
 						Value: newPair.Value,
 					}
 				} else {
-					log.Warning("consul: Previously unknown key %s received with CreateIndex(%d) != ModifyIndex(%d)",
+					log.Warnf("consul: Previously unknown key %s received with CreateIndex(%d) != ModifyIndex(%d); ignoring update",
 						newPair.Key, newPair.CreateIndex, newPair.ModifyIndex)
 				}
 			} else if oldPair.ModifyIndex != newPair.ModifyIndex {
@@ -485,10 +486,10 @@ func (c *ConsulClient) GetWatcher(key string, timeSleep time.Duration) <-chan []
 		for {
 			k, q, err = c.KV().Get(key, &qo)
 			if err != nil {
-				log.Errorf("Unable to retrieve last free Index: %s", err)
+				log.WithError(err).Error("Unable to retrieve last free Index")
 			}
 			if k == nil || q == nil {
-				log.Warning("Unable to retrieve last free Index, please start some containers with labels.")
+				log.Warn("Unable to retrieve last free Index, please start some containers with labels")
 				time.Sleep(curSeconds)
 				if curSeconds < timeSleep {
 					curSeconds += time.Second
@@ -591,7 +592,7 @@ func (c *ConsulClient) ListPrefix(prefix string) (KeyValuePairs, error) {
 
 	p := KeyValuePairs(make(map[string][]byte, len(pairs)))
 	for i := 0; i < len(pairs); i++ {
-		p[pairs[i].Key] = []byte(pairs[i].Value)
+		p[pairs[i].Key] = pairs[i].Value
 	}
 
 	return p, nil

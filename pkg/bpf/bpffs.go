@@ -17,10 +17,16 @@ package bpf
 import (
 	"fmt"
 	"os/exec"
-	"path"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 
-	log "github.com/Sirupsen/logrus"
+	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logfields"
+	"github.com/cilium/cilium/pkg/syncbytes"
+
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 )
 
@@ -75,17 +81,17 @@ func GetMapPrefix() string {
 
 func MapPrefixPath() string {
 	once.Do(lockDown)
-	return path.Join(mapRoot, mapPrefix)
+	return filepath.Join(mapRoot, mapPrefix)
 }
 
 func MapPath(name string) string {
 	once.Do(lockDown)
-	return path.Join(mapRoot, mapPrefix, name)
+	return filepath.Join(mapRoot, mapPrefix, name)
 }
 
 var (
 	mountOnce    sync.Once
-	mountMutex   sync.Mutex
+	mountMutex   lock.Mutex
 	delayedOpens = []*Map{}
 	mounted      bool
 )
@@ -113,10 +119,53 @@ func isBpffs(path string) bool {
 	magic := uint32(0xCAFE4A11)
 	var fsdata unix.Statfs_t
 	if err := unix.Statfs(path, &fsdata); err != nil {
-		log.Errorf("%s is not mounted", path)
+		log.WithField(logfields.Path, path).Error("BPF filesystem path is not mounted")
 		return false
 	}
 	return int32(magic) == int32(fsdata.Type)
+}
+
+func mountCmdPipe(cmds []*exec.Cmd) (mountCmdOutput, mountCmdStandardError []byte, mountCmdError error) {
+
+	// We need atleast one command to pipe.
+	if len(cmds) < 1 {
+		return nil, nil, nil
+	}
+
+	// Total output of commands.
+	var output syncbytes.Buffer
+	var stderr syncbytes.Buffer
+
+	lastCmd := len(cmds) - 1
+	for i, cmd := range cmds[:lastCmd] {
+		var err error
+		// We need to connect every command's stdin to the previous command's stdout
+		if cmds[i+1].Stdin, err = cmd.StdoutPipe(); err != nil {
+			return nil, nil, err
+		}
+		// We need to connect each command's stderr to a buffer
+		cmd.Stderr = &stderr
+	}
+
+	// Connect the output and error for the last command
+	cmds[lastCmd].Stdout, cmds[lastCmd].Stderr = &output, &stderr
+
+	// Let's start each command
+	for _, cmd := range cmds {
+		if err := cmd.Start(); err != nil {
+			return output.Bytes(), stderr.Bytes(), err
+		}
+	}
+
+	// We wait for each command to complete
+	for _, cmd := range cmds {
+		if err := cmd.Wait(); err != nil {
+			return output.Bytes(), stderr.Bytes(), err
+		}
+	}
+
+	// Return the output and the standard error
+	return output.Bytes(), stderr.Bytes(), nil
 }
 
 func mountFS() error {
@@ -127,11 +176,45 @@ func mountFS() error {
 		args = []string{"bpffs", mapRoot, "-t", "bpf"}
 		out, err := exec.Command("mount", args...).CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("Command execution failed: %s\n%s", err, out)
+			return fmt.Errorf("command execution failed: %s\n%s", err, out)
 		}
+	} else { // Already mounted. We need to fail if mounted multiple times.
+
+		// Execute the following command to find multiple bpffs mount points
+		// % mount | grep "<mapRoot> " | wc -l | cut -f1 -d' '
+		newmapRoot := mapRoot + " " // Append space to ignore /sys/fs/bpf/xdp and /sys/fs/bpf/ip mountpoints.
+		cmds := []*exec.Cmd{
+			exec.Command("mount"),
+			exec.Command("grep", newmapRoot),
+			exec.Command("wc", "-l"),
+			exec.Command("cut", "-f1", "-d "),
+		}
+
+		output, stderr, _ := mountCmdPipe(cmds)
+
+		if len(stderr) > 0 {
+			return fmt.Errorf("command execution failed: %s", stderr)
+		}
+
+		// Strip the newline character at the end.
+		parts := strings.Split(string(output), "\n")
+
+		// Convert the string to integer
+		num, err := strconv.ParseInt(parts[0], 10, 32)
+		if err != nil {
+			return fmt.Errorf("command execution failed: %s", err)
+		}
+
+		if num > 1 {
+			return fmt.Errorf("multiple mount points detected at %s", mapRoot)
+		}
+
 	}
 	if !isBpffs(mapRoot) {
-		log.Fatalf("BPF: '%s' is not mounted as BPF filesystem.", mapRoot)
+		// TODO currently on minikube isBpffs check is failing. We need to make the following log
+		// fatal again. This will be tracked in #Issue 1475
+		//log.WithField(logfields.Path, mapRoot).Fatal("BPF: path is not mounted as a BPF filesystem.")
+		log.WithField(logfields.Path, mapRoot).Debug("BPF: path is not mounted as a BPF filesystem.")
 	}
 	mountMutex.Lock()
 	for _, m := range delayedOpens {
@@ -150,7 +233,7 @@ func mountFS() error {
 func MountFS() {
 	mountOnce.Do(func() {
 		if err := mountFS(); err != nil {
-			log.WithError(err).Fatalf("Unable to mount BPF filesystem")
+			log.WithError(err).Fatal("Unable to mount BPF filesystem")
 		}
 	})
 }

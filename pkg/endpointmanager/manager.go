@@ -19,8 +19,9 @@ import (
 	"sync"
 
 	"github.com/cilium/cilium/pkg/endpoint"
+	"github.com/cilium/cilium/pkg/lock"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 var (
@@ -29,7 +30,7 @@ var (
 	// Warning: This lock may not be taken while an individual endpoint
 	// lock is being held. If you require to hold both, then the global
 	// endpointmanager lock must always be acquired first.
-	Mutex sync.RWMutex
+	Mutex lock.RWMutex
 
 	// Endpoints is the global list of endpoints indexed by ID. Mutex must
 	// be held to read and write.
@@ -82,7 +83,7 @@ func LookupDockerID(id string) *endpoint.Endpoint {
 	Mutex.Lock()
 	defer Mutex.Unlock()
 
-	return lookupDockerIDLocked(id)
+	return LookupDockerIDLocked(id)
 }
 
 func lookupIPv4Locked(ipv4 string) *endpoint.Endpoint {
@@ -100,7 +101,9 @@ func LookupIPv4(ipv4 string) *endpoint.Endpoint {
 	return lookupIPv4Locked(ipv4)
 }
 
-func lookupDockerIDLocked(id string) *endpoint.Endpoint {
+// LookupDockerIDLocked is identical to LookupDockerID() but with
+// endpointmanager.Mutex already held
+func LookupDockerIDLocked(id string) *endpoint.Endpoint {
 	if ep, ok := endpointsAux[endpoint.NewID(endpoint.ContainerIdPrefix, id)]; ok {
 		return ep
 	}
@@ -156,7 +159,7 @@ func Insert(ep *endpoint.Endpoint) {
 	updateReferences(ep)
 }
 
-// RemoveLocked removes the endpoint from the global maps. Mutex must be held
+// RemoveLocked is identical to Remove but with endpointmanager.Mutex already held
 func RemoveLocked(ep *endpoint.Endpoint) {
 	delete(Endpoints, ep.ID)
 
@@ -179,7 +182,13 @@ func RemoveLocked(ep *endpoint.Endpoint) {
 	if ep.PodName != "" {
 		delete(endpointsAux, endpoint.NewID(endpoint.PodNamePrefix, ep.PodName))
 	}
+}
 
+// Remove removes the endpoint from the global maps
+func Remove(ep *endpoint.Endpoint) {
+	Mutex.Lock()
+	RemoveLocked(ep)
+	Mutex.Unlock()
 }
 
 // Lookup looks up the endpoint by prefix id
@@ -206,7 +215,7 @@ func LookupLocked(id string) (*endpoint.Endpoint, error) {
 		return nil, fmt.Errorf("Unsupported id format for now")
 
 	case endpoint.ContainerIdPrefix:
-		return lookupDockerIDLocked(eid), nil
+		return LookupDockerIDLocked(eid), nil
 
 	case endpoint.DockerEndpointPrefix:
 		return lookupDockerEndpointLocked(eid), nil
@@ -241,7 +250,7 @@ func TriggerPolicyUpdates(owner endpoint.Owner) *sync.WaitGroup {
 		go func(ep *endpoint.Endpoint, wg *sync.WaitGroup) {
 			policyChanges, err := ep.TriggerPolicyUpdates(owner)
 			if err != nil {
-				log.Warningf("Error while handling policy updates for endpoint %s", err)
+				log.WithError(err).Warn("Error while handling policy updates for endpoint")
 				ep.LogStatus(endpoint.Policy, endpoint.Failure, err.Error())
 			} else {
 				ep.LogStatusOK(endpoint.Policy, "Policy regenerated")
@@ -252,6 +261,7 @@ func TriggerPolicyUpdates(owner endpoint.Owner) *sync.WaitGroup {
 			wg.Done()
 		}(Endpoints[k], &wg)
 	}
+
 	Mutex.RUnlock()
 
 	return &wg

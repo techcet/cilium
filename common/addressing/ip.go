@@ -15,13 +15,11 @@
 package addressing
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"reflect"
 
-	"github.com/cilium/cilium/common/ipam"
 	"github.com/cilium/cilium/pkg/byteorder"
 )
 
@@ -33,7 +31,6 @@ type CiliumIP interface {
 	EndpointPrefix() *net.IPNet
 	IP() net.IP
 	String() string
-	StringNoZeroComp() string
 	IsIPv6() bool
 }
 
@@ -140,49 +137,12 @@ func (ip CiliumIPv6) IP() net.IP {
 	return net.IP(ip)
 }
 
-func (ip CiliumIPv6) IPAMReq() ipam.IPAMReq {
-	i := ip.IP()
-	return ipam.IPAMReq{IP: &i}
-}
-
 func (ip CiliumIPv6) String() string {
 	if ip == nil {
 		return ""
 	}
 
 	return net.IP(ip).String()
-}
-
-// StringNoZeroComp is similar to String but without generating
-// zero compression in the address dump.
-func (ip CiliumIPv6) StringNoZeroComp() string {
-	const maxLen = len("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff")
-	out := make([]byte, 0, maxLen)
-	raw := ip
-
-	if ip == nil {
-		return ""
-	}
-	if len(ip) == 0 {
-		return "<nil>"
-	}
-
-	for i := 0; i < 16; i += 2 {
-		if i > 0 {
-			out = append(out, ':')
-		}
-		src := []byte{raw[i], raw[i+1]}
-		tmp := make([]byte, hex.EncodedLen(len(src)))
-		hex.Encode(tmp, src)
-		if tmp[0] == tmp[1] && tmp[2] == tmp[3] &&
-			tmp[0] == tmp[2] && tmp[0] == '0' {
-			out = append(out, tmp[0])
-		} else {
-			out = append(out, tmp[0], tmp[1], tmp[2], tmp[3])
-		}
-	}
-
-	return string(out)
 }
 
 func (ip CiliumIPv6) MarshalJSON() ([]byte, error) {
@@ -266,22 +226,12 @@ func (ip CiliumIPv4) State() uint16 {
 	return 0
 }
 
-func (ip CiliumIPv4) IPAMReq() ipam.IPAMReq {
-	i := ip.IP()
-	return ipam.IPAMReq{IP: &i}
-}
-
 func (ip CiliumIPv4) String() string {
 	if ip == nil {
 		return ""
 	}
 
 	return net.IP(ip).String()
-}
-
-// StringNoZeroComp is same as String
-func (ip CiliumIPv4) StringNoZeroComp() string {
-	return ip.String()
 }
 
 func (ip CiliumIPv4) MarshalJSON() ([]byte, error) {

@@ -35,6 +35,7 @@ type Proxy6Key struct {
 	Pad     uint8
 }
 
+// HostPort returns host port for provided proxy key
 func (k *Proxy6Key) HostPort() string {
 	portStr := strconv.FormatUint(uint64(k.SPort), 10)
 	return net.JoinHostPort(k.SAddr.IP().String(), portStr)
@@ -47,9 +48,9 @@ type Proxy6Value struct {
 	SourceIdentity uint32
 }
 
-func (p *Proxy6Value) HostPort() string {
-	portStr := strconv.FormatUint(uint64(p.OrigDPort), 10)
-	return net.JoinHostPort(p.OrigDAddr.IP().String(), portStr)
+func (v *Proxy6Value) HostPort() string {
+	portStr := strconv.FormatUint(uint64(v.OrigDPort), 10)
+	return net.JoinHostPort(v.OrigDAddr.IP().String(), portStr)
 }
 
 var (
@@ -89,8 +90,8 @@ func (v *Proxy6Value) GetValuePtr() unsafe.Pointer {
 }
 
 // ToNetwork converts Proxy6Value to network byte order.
-func (p *Proxy6Value) ToNetwork() *Proxy6Value {
-	n := *p
+func (v *Proxy6Value) ToNetwork() *Proxy6Value {
+	n := *v
 	n.OrigDPort = byteorder.HostToNetwork(n.OrigDPort).(uint16)
 	return &n
 }
@@ -117,11 +118,11 @@ func proxy6DumpParser(key []byte, value []byte) (bpf.MapKey, bpf.MapValue, error
 	v := Proxy6Value{}
 
 	if err := binary.Read(keyBuf, byteorder.Native, &k); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert key: %s\n", err)
+		return nil, nil, fmt.Errorf("Unable to convert key: %s", err)
 	}
 
 	if err := binary.Read(valueBuf, byteorder.Native, &v); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert key: %s\n", err)
+		return nil, nil, fmt.Errorf("Unable to convert key: %s", err)
 	}
 
 	return k.ToNetwork(), v.ToNetwork(), nil
@@ -133,30 +134,6 @@ func Dump6(cb bpf.DumpCallback) error {
 	}
 
 	return proxy6Map.Dump(proxy6DumpParser, cb)
-}
-
-func doGc6(interval uint16, key unsafe.Pointer, nextKey unsafe.Pointer, deleted *int) bool {
-	var entry Proxy6Value
-
-	err := bpf.GetNextKey(proxy6Map.GetFd(), key, nextKey)
-	if err != nil {
-		return false
-	}
-
-	err = bpf.LookupElement(proxy6Map.GetFd(), nextKey, unsafe.Pointer(&entry))
-	if err != nil {
-		return false
-	}
-
-	if entry.Lifetime <= interval {
-		bpf.DeleteElement(proxy6Map.GetFd(), nextKey)
-		(*deleted)++
-	} else {
-		entry.Lifetime -= interval
-		bpf.UpdateElement(proxy6Map.GetFd(), nextKey, unsafe.Pointer(&entry), 0)
-	}
-
-	return true
 }
 
 func GC6() int {

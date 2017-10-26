@@ -1,8 +1,10 @@
 include Makefile.defs
 
 SUBDIRS = plugins bpf cilium daemon monitor
-GOFILES = $(shell go list ./... | grep -v /vendor/)
+GOFILES ?= $(shell go list ./... | grep -v /vendor/ | grep -v /contrib/ | grep -v /test)
 GOLANGVERSION = $(shell go version 2>/dev/null | grep -Eo '(go[0-9].[0-9])')
+GOLANG_SRCFILES=$(shell for pkg in $GOFILES; do find $(pkg) -name *.go -print; done | grep -v /vendor/)
+BPF_SRCFILES=$(shell find bpf/ -name *.[ch] -print)
 
 GOTEST_OPTS = -test.v -check.v
 
@@ -14,6 +16,17 @@ $(SUBDIRS): force
 	@ $(MAKE) -C $@ all
 
 tests: tests-common tests-consul
+
+tests-ginkgo: tests-common-ginkgo
+
+tests-common-ginkgo: force
+	tests/00-fmt.sh
+	# Make the bindata to run the unittest
+	make -C daemon go-bindata
+	docker-compose -f test/docker-compose.yml -p $$JOB_BASE_NAME-$$BUILD_NUMBER run --rm test
+	# Remove the networks
+	docker-compose -f test/docker-compose.yml -p $$JOB_BASE_NAME-$$BUILD_NUMBER down
+	go vet $(GOFILES)
 
 tests-common: force
 	tests/00-fmt.sh
@@ -43,6 +56,20 @@ tests-etcd:
 	@rmdir ./daemon/1 ./daemon/1_backup 2> /dev/null || true
 	docker rm -f "cilium-etcd-test-container"
 
+tests-consul-ginkgo:
+	echo "mode: count" > coverage-all.out
+	echo "mode: count" > coverage.out
+	$(foreach pkg,$(GOFILES),\
+	go test \
+            -ldflags "-X github.com/cilium/cilium/pkg/kvstore.backend=consul -X github.com/cilium/cilium/pkg/kvstore.consulAddress=consul:8500" \
+            -timeout 30s -coverprofile=coverage.out -covermode=count $(pkg) $(GOTEST_OPTS) || exit 1;\
+            tail -n +2 coverage.out >> coverage-all.out;)
+	go tool cover -html=coverage-all.out -o=coverage-all.html
+	rm coverage-all.out
+	rm coverage.out
+	@rmdir ./daemon/1 ./daemon/1_backup 2> /dev/null || true
+
+
 tests-consul:
 	@docker rm -f "cilium-consul-test-container" 2> /dev/null || true
 	-docker run -d \
@@ -64,6 +91,16 @@ tests-consul:
 	@rmdir ./daemon/1 ./daemon/1_backup 2> /dev/null || true
 	docker rm -f "cilium-consul-test-container"
 
+clean-tags:
+	-$(MAKE) -C bpf/ clean-tags
+	-rm -f cscope.out cscope.in.out cscope.po.out cscope.files tags
+
+tags: $(GOLANG_SRCFILES) $(BPF_SRCFILES)
+	@$(MAKE) -C bpf/ tags
+	gotags -R . > tags
+	@ echo $(GOLANG_SRCFILES) | sed 's/ /\n/g' > cscope.files
+	cscope -R -b -q
+
 clean-container:
 	for i in $(SUBDIRS); do $(MAKE) -C $$i clean; done
 	for i in $(SUBDIRSLIB); do $(MAKE) -C $$i clean; done
@@ -77,6 +114,9 @@ install:
 	$(INSTALL) -m 0755 -d $(DESTDIR)$(BINDIR)
 	for i in $(SUBDIRS); do $(MAKE) -C $$i install; done
 	for i in $(SUBDIRSLIB); do $(MAKE) -C $$i install; done
+
+dockerfiles:
+	$(MAKE) -C ./contrib/packaging/docker dockerfiles
 
 docker-image-prod:
 	$(MAKE) -C ./contrib/packaging/docker docker-image-prod
@@ -132,6 +172,38 @@ gofmt:
 
 precheck-gofmt:
 	tests/00-fmt.sh
+
+pprof-help:
+	@echo "Available pprof targets:"
+	@echo "  pprof-heap"
+	@echo "  pprof-profile"
+	@echo "  pprof-block"
+	@echo "  pprof-trace-5s"
+	@echo "  pprof-mutex"
+
+pprof-heap:
+	go tool pprof http://localhost:6060/debug/pprof/heap
+
+pprof-profile:
+	go tool pprof http://localhost:6060/debug/pprof/profile
+
+
+pprof-block:
+	go tool pprof http://localhost:6060/debug/pprof/block
+
+pprof-trace-5s:
+	curl http://localhost:6060/debug/pprof/trace?seconds=5
+
+pprof-mutex:
+	go tool pprof http://localhost:6060/debug/pprof/mutex
+
+update-authors:
+	@echo "Updating AUTHORS file..."
+	@echo "The following people, in alphabetical order, have either authored or signed" > AUTHORS
+	@echo "off on commits in the Cilium repository:" >> AUTHORS
+	@echo "" >> AUTHORS
+	@contrib/scripts/extract_authors.sh >> AUTHORS
+	@cat .AUTHORS.aux >> AUTHORS
 
 .PHONY: force
 force :;

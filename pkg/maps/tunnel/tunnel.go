@@ -101,11 +101,11 @@ func dumpParser(key []byte, value []byte) (bpf.MapKey, bpf.MapValue, error) {
 	k, v := tunnelEndpoint{}, tunnelEndpoint{}
 
 	if err := binary.Read(bytes.NewBuffer(key), byteorder.Native, &k); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert key: %s\n", err)
+		return nil, nil, fmt.Errorf("Unable to convert key: %s", err)
 	}
 
 	if err := binary.Read(bytes.NewBuffer(value), byteorder.Native, &v); err != nil {
-		return nil, nil, fmt.Errorf("Unable to convert key: %s\n", err)
+		return nil, nil, fmt.Errorf("Unable to convert key: %s", err)
 	}
 
 	return k, v, nil
@@ -117,6 +117,9 @@ func dumpCallback(key bpf.MapKey, value bpf.MapValue) {
 }
 
 // DumpMap prints the content of the tunnel endpoint map to stdout
-func DumpMap() error {
-	return mapInstance.Dump(dumpParser, dumpCallback)
+func DumpMap(callback bpf.DumpCallback) error {
+	if callback == nil {
+		return mapInstance.Dump(dumpParser, dumpCallback)
+	}
+	return mapInstance.Dump(dumpParser, callback)
 }

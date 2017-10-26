@@ -29,10 +29,16 @@ import (
 const (
 	// IDNameAll is a special label which matches all labels.
 	IDNameAll = "all"
+
 	// IDNameHost is the label used for the hostname ID.
 	IDNameHost = "host"
+
 	// IDNameWorld is the label used for the world ID.
 	IDNameWorld = "world"
+
+	// IDNameCluster is the label used to identify an unspecified endpoint
+	// inside the cluster
+	IDNameCluster = "cluster"
 )
 
 // OpLabels represents the the possible types.
@@ -153,6 +159,19 @@ type Label struct {
 
 // Labels is a map of labels where the map's key is the same as the label's key.
 type Labels map[string]*Label
+
+// String returns the map of labels as human readable string
+func (l Labels) String() string {
+	str := ""
+	for _, v := range l {
+		if str != "" {
+			str += ","
+		}
+		str += v.String()
+	}
+
+	return str
+}
 
 // MarkAllForDeletion marks all the labels with the DeletionMark.
 func (l Labels) MarkAllForDeletion() {
@@ -446,6 +465,11 @@ func (l Labels) ToSlice() []*Label {
 		labels = append(labels, v.DeepCopy())
 	}
 	return labels
+}
+
+// LabelArray returns the labels as label array
+func (l Labels) LabelArray() LabelArray {
+	return l.ToSlice()
 }
 
 // parseSource returns the parsed source of the given str. It also returns the next piece

@@ -153,6 +153,13 @@ struct endpoint_info {
 	struct portmap  portmap[PORTMAP_MAX];
 };
 
+struct policy_key {
+	__u32		sec_label;
+	__u16		dport;
+	__u8		protocol;
+	__u8		pad;
+};
+
 struct policy_entry {
 	__u32		action;
 	__u32		pad;
@@ -165,6 +172,7 @@ enum {
 	CILIUM_NOTIFY_DROP,
 	CILIUM_NOTIFY_DBG_MSG,
 	CILIUM_NOTIFY_DBG_CAPTURE,
+	CILIUM_NOTIFY_TRACE,
 };
 
 #define NOTIFY_COMMON_HDR \
@@ -173,15 +181,9 @@ enum {
 	__u16		source; \
 	__u32		hash;
 
-struct drop_notify {
-	NOTIFY_COMMON_HDR
-	__u32		len_orig;
-	__u32		len_cap;
-	__u32		src_label;
-	__u32		dst_label;
-	__u32		dst_id;
-	__u32		ifindex;
-};
+#ifndef TRACE_PAYLOAD_LEN
+#define TRACE_PAYLOAD_LEN 128ULL
+#endif
 
 #ifndef BPF_F_PSEUDO_HDR
 # define BPF_F_PSEUDO_HDR                (1ULL << 4)
@@ -225,7 +227,7 @@ struct drop_notify {
 
 /* Magic skb->mark markers which identify packets originating from the proxy
  *
- * The uppper 16 bits contain the magic marker values which indicate whether
+ * The upper 16 bits contain the magic marker values which indicate whether
  * the packet is coming from an ingress or egress proxy.
  *
  * The lower 16 bits may contain the security identity of the original source
@@ -254,8 +256,7 @@ static inline int __inline__ mark_is_from_proxy(struct __sk_buff *skb)
 		return SOURCE_INGRESS_PROXY;
 	else if (magic == MARK_MAGIC_PROXY_EGRESS)
 		return SOURCE_EGRESS_PROXY;
-	else
-		return 0;
+	return 0;
 }
 
 /**
@@ -273,14 +274,6 @@ static inline int __inline__ get_identity_via_proxy(struct __sk_buff *skb)
  *   bpf_host -> bpf_lxc
  */
 #define TC_INDEX_F_SKIP_PROXY		1
-
-/**
- * tc_index_is_from_proxy - returns true if packet originates from egress proxy
- */
-static inline bool __inline__ tc_index_skip_proxy(struct __sk_buff *skb)
-{
-	return skb->tc_index & TC_INDEX_F_SKIP_PROXY;
-}
 
 /* skb->cb[] usage: */
 enum {

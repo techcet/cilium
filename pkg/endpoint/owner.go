@@ -15,9 +15,8 @@
 package endpoint
 
 import (
-	"sync"
-
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/policy"
 )
 
@@ -29,9 +28,6 @@ type Owner interface {
 	// Must return true if dry mode is enabled
 	DryModeEnabled() bool
 
-	// EnablePolicyEnforcement returns whether owner should enable policy enforcement.
-	EnablePolicyEnforcement() bool
-
 	// EnableEndpointPolicyEnforcement returns whether policy enforcement
 	// should be enabled for the specified endpoint.
 	EnableEndpointPolicyEnforcement(e *Endpoint) bool
@@ -42,9 +38,6 @@ type Owner interface {
 	// AlwaysAllowLocalhost returns true if localhost is always allowed to
 	// reach local endpoints
 	AlwaysAllowLocalhost() bool
-
-	// Must return an instance of a ConsumableCache
-	GetConsumableCache() *policy.ConsumableCache
 
 	// Must resolve label id to an identity
 	GetCachedLabelList(ID policy.NumericIdentity) (labels.LabelArray, error)
@@ -81,7 +74,7 @@ type Owner interface {
 
 	// GetCompilationLock returns the mutex responsible for synchronizing compilation
 	// of BPF programs.
-	GetCompilationLock() *sync.RWMutex
+	GetCompilationLock() *lock.RWMutex
 }
 
 // Request is used to create the endpoint's request and send it to the endpoints

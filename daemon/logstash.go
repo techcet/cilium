@@ -22,10 +22,11 @@ import (
 	"time"
 
 	"github.com/cilium/cilium/pkg/endpointmanager"
+	"github.com/cilium/cilium/pkg/logfields"
 	"github.com/cilium/cilium/pkg/maps/policymap"
 	"github.com/cilium/cilium/pkg/policy"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 // LogstashStat is used to collect stats from the policy dumps.
@@ -41,17 +42,19 @@ type LogstashStat struct {
 func newLogstashClient(addr string) net.Conn {
 	i := 3
 	for {
+		scopedLog := log.WithField(logfields.IPAddr, addr)
+
 		c, err := net.Dial("tcp", addr)
 		if err != nil {
 			if i >= 0 {
-				log.Errorf("Error while connecting to Logstash address %s: %s", addr, err)
+				scopedLog.WithError(err).Error("Error while connecting to Logstash address")
 				if i == 0 {
-					log.Info("Mutting Logstash connection errors but still retrying...")
+					scopedLog.Info("Muting Logstash connection errors but still retrying...")
 				}
 				i--
 			}
 		} else {
-			log.Infof("Connection to Logstash %s successfully made", addr)
+			scopedLog.Info("Connection to Logstash successfully made")
 			return c
 		}
 		time.Sleep(10 * time.Second)
@@ -82,7 +85,7 @@ func (d *Daemon) EnableLogstash(LogstashAddr string, refreshTime int) {
 			lss := d.processStats(allPes)
 			for _, ls := range lss {
 				if err := json.NewEncoder(c).Encode(ls); err != nil {
-					log.Errorf("Error while sending data to Logstash: %s", err)
+					log.WithError(err).Error("Error while sending data to Logstash")
 					timeToProcess2 := time.Now()
 					time.Sleep(time.Second*time.Duration(refreshTime) - timeToProcess2.Sub(timeToProcess1))
 					return
@@ -119,8 +122,8 @@ func (d *Daemon) processStats(allPes map[uint16][]policymap.PolicyEntryDump) []L
 		}
 		for _, stat := range v {
 			lss = append(lss, LogstashStat{
-				FromID:  stat.ID,
-				From:    d.getInlineLabelStr(policy.NumericIdentity(stat.ID)),
+				FromID:  stat.Key.Identity,
+				From:    d.getInlineLabelStr(policy.NumericIdentity(stat.Key.Identity)),
 				ToID:    strconv.FormatUint(uint64(k), 10),
 				Bytes:   stat.Bytes,
 				Packets: stat.Packets,

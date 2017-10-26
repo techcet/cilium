@@ -23,8 +23,9 @@ import (
 	"github.com/cilium/cilium/common/types"
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
+	"github.com/cilium/cilium/pkg/logfields"
 
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -72,8 +73,8 @@ func ParseMAC(s string) (MAC, error) {
 	if len(ha) != 6 {
 		return 0, fmt.Errorf("invalid MAC address %s", s)
 	}
-	return MAC(MAC(ha[5])<<40 | MAC(ha[4])<<32 | MAC(ha[3])<<24 |
-		MAC(ha[2])<<16 | MAC(ha[1])<<8 | MAC(ha[0])), nil
+	return MAC(ha[5])<<40 | MAC(ha[4])<<32 | MAC(ha[3])<<24 |
+		MAC(ha[2])<<16 | MAC(ha[1])<<8 | MAC(ha[0]), nil
 }
 
 // PortMap represents a port mapping from the host to the LXC.
@@ -211,7 +212,7 @@ func DeleteElement(f EndpointFrontend) int {
 	errors := 0
 	for _, k := range f.GetBPFKeys() {
 		if err := mapInstance.Delete(k); err != nil {
-			log.Warningf("Unable to delete endpoint %s in BPF map: %s", k, err)
+			log.WithError(err).WithField(logfields.BPFMapKey, k).Warn("Unable to delete endpoint in BPF map")
 			errors++
 		}
 	}

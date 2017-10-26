@@ -16,18 +16,19 @@ package policy
 
 import (
 	"encoding/json"
-	"strings"
-	"sync"
 
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/policy/api"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Repository is a list of policy rules which in combination form the security
 // policy. A policy repository can be
 type Repository struct {
 	// Mutex protects the whole policy tree
-	Mutex sync.RWMutex
+	Mutex lock.RWMutex
 	rules []*rule
 
 	// revision is the revision of the policy repository. It will be
@@ -41,13 +42,31 @@ func NewPolicyRepository() *Repository {
 }
 
 // traceState is an internal structure used to collect information
-// while determing policy decision
+// while determining policy decision
 type traceState struct {
 	// selectedRules is the number of rules with matching EndpointSelector
 	selectedRules int
 
+	// matchedRules is the number of rules that have allowed traffic
+	matchedRules int
+
+	// constrainedRules counts how many "FromRequires" constraints are
+	// unsatisfied
+	constrainedRules int
+
 	// ruleID is the rule ID currently being evaluated
 	ruleID int
+}
+
+func (state *traceState) trace(p *Repository, ctx *SearchContext) {
+	ctx.PolicyTrace("%d/%d rules selected\n", state.selectedRules, len(p.rules))
+	if state.constrainedRules > 0 {
+		ctx.PolicyTrace("Found unsatisfied FromRequires constraint\n")
+	} else if state.matchedRules > 0 {
+		ctx.PolicyTrace("Found allow rule\n")
+	} else {
+		ctx.PolicyTrace("Found no allow rule\n")
+	}
 }
 
 // CanReachRLocked evaluates the policy repository for the provided search
@@ -57,13 +76,15 @@ func (p *Repository) CanReachRLocked(ctx *SearchContext) api.Decision {
 	decision := api.Undecided
 	state := traceState{}
 
+loop:
 	for i, r := range p.rules {
 		state.ruleID = i
 		switch r.canReach(ctx, &state) {
 		// The rule contained a constraint which was not met, this
 		// connection is not allowed
 		case api.Denied:
-			return api.Denied
+			decision = api.Denied
+			break loop
 
 		// The rule allowed the connection but a later rule may impose
 		// additional constraints, so we store the decision but allow
@@ -73,16 +94,16 @@ func (p *Repository) CanReachRLocked(ctx *SearchContext) api.Decision {
 		}
 	}
 
-	ctx.PolicyTrace("%d rules matched", state.selectedRules)
+	state.trace(p, ctx)
 
 	return decision
 }
 
-// AllowsRLocked evaluates the policy repository for the provided search
+// AllowsLabelAccess evaluates the policy repository for the provided search
 // context and returns the verdict. If no matching policy allows for the
 // connection, the request will be denied. The policy repository mutex must be
 // held.
-func (p *Repository) AllowsRLocked(ctx *SearchContext) api.Decision {
+func (p *Repository) AllowsLabelAccess(ctx *SearchContext) api.Decision {
 	ctx.PolicyTrace("Tracing %s\n", ctx.String())
 	decision := api.Denied
 
@@ -94,7 +115,7 @@ func (p *Repository) AllowsRLocked(ctx *SearchContext) api.Decision {
 		}
 	}
 
-	ctx.PolicyTrace("Result: %s\n", strings.ToUpper(decision.String()))
+	ctx.PolicyTrace("Label verdict: %s", decision.String())
 
 	return decision
 }
@@ -106,10 +127,11 @@ func (p *Repository) AllowsRLocked(ctx *SearchContext) api.Decision {
 // are merged together. If rules contains overlapping port definitions, the first
 // rule found in the repository takes precedence.
 //
-// TODO: Need better rule merging on conflicting port definitions, concat l7 rules?
-func (p *Repository) ResolveL4Policy(ctx *SearchContext) *L4Policy {
+// TODO: Coalesce l7 rules?
+func (p *Repository) ResolveL4Policy(ctx *SearchContext) (*L4Policy, error) {
 	result := NewL4Policy()
 
+	ctx.PolicyTrace("\n")
 	if ctx.EgressL4Only {
 		ctx.PolicyTrace("Resolving egress port policy for %+v\n", ctx.To)
 	} else if ctx.IngressL4Only {
@@ -120,12 +142,18 @@ func (p *Repository) ResolveL4Policy(ctx *SearchContext) *L4Policy {
 
 	state := traceState{}
 	for _, r := range p.rules {
-		r.resolveL4Policy(ctx, &state, result)
+		found, err := r.resolveL4Policy(ctx, &state, result)
+		if err != nil {
+			return nil, err
+		}
 		state.ruleID++
+		if found != nil {
+			state.matchedRules++
+		}
 	}
 
-	ctx.PolicyTrace("%d rules matched\n", state.selectedRules)
-	return result
+	state.trace(p, ctx)
+	return result, nil
 }
 
 // ResolveL3Policy resolves the L3 policy for a set of endpoints by searching
@@ -143,8 +171,85 @@ func (p *Repository) ResolveL3Policy(ctx *SearchContext) *L3Policy {
 		state.ruleID++
 	}
 
-	ctx.PolicyTrace("%d rules matched\n", state.selectedRules)
+	state.trace(p, ctx)
 	return result
+}
+
+func (p *Repository) allowsL4Egress(searchCtx *SearchContext) api.Decision {
+	ctx := *searchCtx
+	ctx.To = ctx.From
+	ctx.From = labels.LabelArray{}
+	ctx.EgressL4Only = true
+
+	policy, err := p.ResolveL4Policy(&ctx)
+	if err != nil {
+		log.WithError(err).Warn("Evaluation error while resolving L4 egress policy")
+	}
+	verdict := api.Undecided
+	if err == nil && len(policy.Egress) > 0 {
+		verdict = policy.EgressCoversDPorts(ctx.DPorts)
+	}
+
+	if len(ctx.DPorts) == 0 {
+		ctx.PolicyTrace("L4 egress verdict: [no port context specified]")
+	} else {
+		ctx.PolicyTrace("L4 egress verdict: %s", verdict.String())
+	}
+
+	return verdict
+}
+
+func (p *Repository) allowsL4Ingress(ctx *SearchContext) api.Decision {
+	ctx.IngressL4Only = true
+
+	policy, err := p.ResolveL4Policy(ctx)
+	if err != nil {
+		log.WithError(err).Warn("Evaluation error while resolving L4 ingress policy")
+	}
+	verdict := api.Undecided
+	if err == nil && len(policy.Ingress) > 0 {
+		verdict = policy.IngressCoversContext(ctx)
+	}
+
+	if len(ctx.DPorts) == 0 {
+		ctx.PolicyTrace("L4 ingress verdict: [no port context specified]")
+	} else {
+		ctx.PolicyTrace("L4 ingress verdict: %s", verdict.String())
+	}
+
+	return verdict
+}
+
+// AllowsRLocked evaluates the policy repository for the provided search
+// context and returns the verdict. If no matching policy allows for the
+// connection, the request will be denied. The policy repository mutex must be
+// held.
+func (p *Repository) AllowsRLocked(ctx *SearchContext) api.Decision {
+	ctx.PolicyTrace("Tracing %s\n", ctx.String())
+	decision := p.CanReachRLocked(ctx)
+	ctx.PolicyTrace("Label verdict: %s", decision.String())
+	if decision == api.Allowed {
+		return decision
+	}
+
+	// We only report the overall decision as L4 inclusive if a port has
+	// been specified
+	if len(ctx.DPorts) != 0 {
+		l4Egress := p.allowsL4Egress(ctx)
+		l4Ingress := p.allowsL4Ingress(ctx)
+
+		// Explicit deny should deny; Allow+Undecided should allow
+		if l4Egress == api.Denied || l4Ingress == api.Denied {
+			decision = api.Denied
+		} else if l4Egress == api.Allowed || l4Ingress == api.Allowed {
+			decision = api.Allowed
+		}
+	}
+
+	if decision != api.Allowed {
+		decision = api.Denied
+	}
+	return decision
 }
 
 // SearchRLocked searches the policy repository for rules which match the
@@ -167,7 +272,7 @@ func (p *Repository) Add(r api.Rule) (uint64, error) {
 	defer p.Mutex.Unlock()
 
 	realRule := &rule{Rule: r}
-	if err := realRule.validate(); err != nil {
+	if err := realRule.sanitize(); err != nil {
 		return p.revision, err
 	}
 
@@ -184,7 +289,7 @@ func (p *Repository) AddListLocked(rules api.Rules) (uint64, error) {
 	newList := make([]*rule, len(rules))
 	for i := range rules {
 		newList[i] = &rule{Rule: *rules[i]}
-		if err := newList[i].validate(); err != nil {
+		if err := newList[i].sanitize(); err != nil {
 			return p.revision, err
 		}
 	}
@@ -260,10 +365,15 @@ func (p *Repository) GetJSON() string {
 // rule with labels matching the labels in the provided LabelArray.
 //
 // Must be called with p.Mutex held
-func (p *Repository) GetRulesMatching(labels labels.LabelArray) bool {
+func (p *Repository) GetRulesMatching(labels labels.LabelArray, includeEntities bool) bool {
+
 	for _, r := range p.rules {
 		rulesMatch := r.EndpointSelector.Matches(labels)
 		if rulesMatch {
+			return true
+		}
+
+		if includeEntities && len(r.toEntities)+len(r.fromEntities) > 0 {
 			return true
 		}
 	}

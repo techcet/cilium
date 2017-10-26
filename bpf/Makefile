@@ -8,7 +8,7 @@ CLANG_FLAGS :=  ${FLAGS} -target bpf -emit-llvm
 CLANG_FLAGS += -Wall -Werror -Wno-address-of-packed-member -Wno-unknown-warning-option
 LLC_FLAGS   := -march=bpf -mcpu=probe -filetype=obj
 
-BPF = bpf_lxc.o bpf_netdev.o bpf_overlay.o bpf_lb.o
+BPF = bpf_lxc.o bpf_netdev.o bpf_overlay.o bpf_lb.o bpf_xdp.o
 SCRIPTS = init.sh join_ep.sh run_probes.sh
 LIB := $(shell find ./lib -name '*.h')
 
@@ -18,6 +18,13 @@ LLC   ?= llc
 ifeq ("$(PKG_BUILD)","")
 
 all: $(BPF)
+
+clean-tags:
+	-rm -f cscope.out cscope.in.out cscope.po.out tags
+
+tags: *.c $(LIB)
+	cscope -R -b -q
+	ctags -R .
 
 %.o: %.c
 	${CLANG} ${CLANG_FLAGS} -c $< -o - | ${LLC} ${LLC_FLAGS} -o $@
@@ -52,5 +59,5 @@ endif
 
 install:
 
-clean:
+clean: clean-tags
 	rm -fr *.o

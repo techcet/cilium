@@ -21,17 +21,18 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/cilium/cilium/api/v1/models"
 	. "github.com/cilium/cilium/api/v1/server/restapi/policy"
 	"github.com/cilium/cilium/common"
 	"github.com/cilium/cilium/pkg/apierror"
-	"github.com/cilium/cilium/pkg/events"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/logfields"
 	"github.com/cilium/cilium/pkg/nodeaddress"
 	"github.com/cilium/cilium/pkg/policy"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/go-openapi/runtime/middleware"
+	log "github.com/sirupsen/logrus"
 )
 
 func updateSecLabelIDRef(id policy.Identity) error {
@@ -49,35 +50,13 @@ func gasNewSecLabelID(id *policy.Identity) error {
 	return kvstore.Client().GASNewSecLabelID(common.LabelIDKeyPath, uint32(baseID), id)
 }
 
-// type putIdentity struct {
-// 	daemon *Daemon
-// }
-//
-// func NewPutIdentityHandler(d *Daemon) PutIdentityHandler {
-// 	return &putIdentity{daemon: d}
-// }
-//
-// func (h *putIdentity) Handle(params PutIdentityParams) middleware.Responder {
-// 	d := h.daemon
-// 	lbls := labels.NewLabelsFromModel(params.Labels)
-// 	epid := ""
-// 	if params.Endpoint != nil {
-// 		epid = *params.Endpoint
-// 	}
-//
-// 	if id, _, err := d.CreateOrUpdateIdentity(lbls, epid); err != nil {
-// 		return err
-// 	} else {
-// 		return NewPutIdentityOK().WithPayload(id.GetModel())
-// 	}
-// }
-
 func (d *Daemon) CreateOrUpdateIdentity(lbls labels.Labels, epid string) (*policy.Identity, bool, error) {
-	if epid != "" {
-		epid = nodeaddress.GetExternalIPv4().String() + ":" + epid
-	}
+	clusterEndpointID := nodeaddress.GetExternalIPv4().String() + ":" + epid
 
-	log.Debugf("Associating labels %+v with endpoint %s", lbls, epid)
+	log.WithFields(log.Fields{
+		logfields.EndpointID:     epid,
+		logfields.IdentityLabels: lbls.String(),
+	}).Debug("Associating endpoint with identity")
 
 	isNew := false
 
@@ -115,10 +94,8 @@ func (d *Daemon) CreateOrUpdateIdentity(lbls labels.Labels, epid string) (*polic
 		}
 	}
 
-	if epid != "" {
-		// Refresh timestamp of endpoint association
-		identity.AssociateEndpoint(epid)
-	}
+	// Refresh timestamp of endpoint association
+	identity.AssociateEndpoint(clusterEndpointID)
 
 	// FIXME FIXME FIXME
 	//
@@ -126,12 +103,22 @@ func (d *Daemon) CreateOrUpdateIdentity(lbls labels.Labels, epid string) (*polic
 	// K/V store operations
 
 	if isNew {
-		log.Debugf("Creating new identity %d ref-count to %d", identity.ID, identity.RefCount())
+		log.WithFields(log.Fields{
+			logfields.EndpointID:     epid,
+			logfields.IdentityLabels: lbls.String(),
+		}).Debug("Creating new identity")
+
 		if err := gasNewSecLabelID(identity); err != nil {
 			return nil, false, err
 		}
 	} else {
-		log.Debugf("Incrementing identity %d ref-count to %d", identity.ID, identity.RefCount())
+		log.WithFields(log.Fields{
+			logfields.EndpointID:     epid,
+			logfields.Identity:       identity.StringID(),
+			logfields.IdentityLabels: lbls.String(),
+			"refCount":               identity.RefCount(),
+		}).Debug("Keeping identity alive")
+
 		if err := updateSecLabelIDRef(*identity); err != nil {
 			return nil, false, err
 		}
@@ -142,14 +129,16 @@ func (d *Daemon) CreateOrUpdateIdentity(lbls labels.Labels, epid string) (*polic
 		return nil, false, err
 	}
 
-	d.events <- *events.NewEvent(events.IdentityAdd, identity.DeepCopy())
-
 	return identity, isNew, nil
 }
 
 func (d *Daemon) updateEndpointIdentity(epID, oldLabelsHash string, opLabels *labels.OpLabels) (*policy.Identity, string, error) {
 	lbls := opLabels.IdentityLabels()
-	log.Debugf("Endpoint %s is resolving identity for labels %+v", epID, lbls)
+
+	log.WithFields(log.Fields{
+		logfields.EndpointID:     epID,
+		logfields.IdentityLabels: lbls,
+	}).Debug("Resolving identity for endpoint")
 
 	newLabelsHash := lbls.SHA256Sum()
 	identity, _, err := d.CreateOrUpdateIdentity(lbls, epID)
@@ -159,13 +148,19 @@ func (d *Daemon) updateEndpointIdentity(epID, oldLabelsHash string, opLabels *la
 
 	if newLabelsHash != oldLabelsHash {
 		if err := d.DeleteIdentityBySHA256(oldLabelsHash, epID); err != nil {
-			log.Warningf("Error while deleting old labels (%+v) of endpoint %s: %s",
-				oldLabelsHash, epID, err)
-			// FIXME: Undo new identity and fail?
+			log.WithFields(log.Fields{
+				"oldIdentityHash":    oldLabelsHash,
+				logfields.EndpointID: epID,
+			}).WithError(err).Warn("Unable to delete old identity of endpoint")
 		}
 	}
 
-	log.Debugf("Resolved identity: %+v", identity)
+	log.WithFields(log.Fields{
+		logfields.EndpointID:     epID,
+		logfields.IdentityLabels: lbls,
+		logfields.Identity:       identity.StringID(),
+	}).Debug("Resolved identity for endpoint")
+
 	return identity, newLabelsHash, nil
 }
 
@@ -232,17 +227,35 @@ func NewGetIdentityHandler(d *Daemon) GetIdentityHandler {
 }
 
 func (h *getIdentity) Handle(params GetIdentityParams) middleware.Responder {
-	lbls := labels.NewLabelsFromModel(params.Labels)
-	if id, err := LookupIdentityBySHA256(lbls.SHA256Sum()); err != nil {
-		if apierr, ok := err.(*apierror.APIError); ok {
-			return apierr
+	log.WithField(logfields.Params, logfields.Repr(params)).Debug("GET /identity request")
+
+	identities := []*models.Identity{}
+	if params.Labels == nil {
+		// if labels is nil, return all identities from the kvstore
+		// This is in response to "identity list" command
+		outputList, err := kvstore.Client().ListPrefix(common.LabelIDKeyPath)
+		if err != nil {
+			return apierror.Error(GetIdentityIDInvalidStorageFormatCode, err)
 		}
-		return apierror.Error(GetIdentityUnreachableCode, err)
-	} else if id == nil {
-		return NewGetIdentityNotFound()
+		for _, v := range outputList {
+			if id, err := parseIdentityResponse(v); err != nil {
+				return apierror.Error(GetIdentityIDInvalidStorageFormatCode, err)
+			} else if id != nil {
+				identities = append(identities, id.GetModel())
+			}
+		}
 	} else {
-		return NewGetIdentityOK().WithPayload(id.GetModel())
+		lbls := labels.NewLabelsFromModel(params.Labels)
+		if id, err := LookupIdentityBySHA256(lbls.SHA256Sum()); err != nil {
+			if apierr, ok := err.(*apierror.APIError); ok {
+				return apierr
+			}
+			return apierror.Error(GetIdentityUnreachableCode, err)
+		} else if id != nil {
+			identities = append(identities, id.GetModel())
+		}
 	}
+	return NewGetIdentityOK().WithPayload(identities)
 }
 
 type getIdentityID struct {
@@ -290,35 +303,6 @@ func (d *Daemon) DeleteIdentity(id policy.NumericIdentity, epid string) error {
 	return nil
 }
 
-// type deleteIdentity struct {
-// 	daemon *Daemon
-// }
-//
-// func NewDeleteIdentityHandler(d *Daemon) DeleteIdentityHandler {
-// 	return &deleteIdentity{daemon: d}
-// }
-//
-// func (h *deleteIdentity) Handle(params DeleteIdentityParams) middleware.Responder {
-// 	d := h.daemon
-//
-// 	if params.ID == nil {
-// 		return NewDeleteIdentityNotFound()
-// 	}
-//
-// 	id := policy.NumericIdentity(*params.ID)
-//
-// 	epid := ""
-// 	if params.Endpoint != nil {
-// 		epid = *params.Endpoint
-// 	}
-//
-// 	if err := d.DeleteIdentity(id, epid); err != nil {
-// 		return err
-// 	}
-//
-// 	return NewDeleteIdentityOK()
-// }
-
 // DeleteIdentityBySHA256 deletes the SecCtxLabels that belong to the labels' sha256Sum.
 func (d *Daemon) DeleteIdentityBySHA256(sha256Sum string, epid string) error {
 	if epid != "" {
@@ -364,19 +348,13 @@ func (d *Daemon) DeleteIdentityBySHA256(sha256Sum string, epid string) error {
 		return err
 	}
 
-	log.Debugf("Decremented label %d ref-count to %d", dbSecCtxLbls.ID, dbSecCtxLbls.RefCount())
+	log.WithFields(log.Fields{
+		logfields.EndpointID:     epid,
+		logfields.IdentityLabels: dbSecCtxLbls.ID,
+		"count":                  dbSecCtxLbls.RefCount(),
+	}).Debug("Decremented label ref-count")
 
-	if err := kvstore.Client().SetValue(lblPath, dbSecCtxLbls); err != nil {
-		return err
-	}
-
-	if dbSecCtxLbls.RefCount() == 0 {
-		d.events <- *events.NewEvent(events.IdentityDel, dbSecCtxLbls.DeepCopy())
-	} else {
-		d.events <- *events.NewEvent(events.IdentityMod, dbSecCtxLbls.DeepCopy())
-	}
-
-	return nil
+	return kvstore.Client().SetValue(lblPath, dbSecCtxLbls)
 }
 
 // GetMaxLabelID returns the maximum possible free UUID stored in consul.

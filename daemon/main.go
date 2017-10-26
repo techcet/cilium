@@ -1,4 +1,4 @@
-// Copyright 2016- 2017Authors of Cilium
+// Copyright 2016-2017 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,7 +23,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -36,39 +35,45 @@ import (
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpointmanager"
+	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/logfields"
 	"github.com/cilium/cilium/pkg/nodeaddress"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/pprof"
 	"github.com/cilium/cilium/pkg/version"
+	"github.com/cilium/cilium/pkg/workloads/containerd"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/go-openapi/loads"
+	gops "github.com/google/gops/agent"
+	go_version "github.com/hashicorp/go-version"
 	flags "github.com/jessevdk/go-flags"
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
-const (
-	majorMinKernelVersion         = 4
-	minorRecommendedKernelVersion = 9
-	minorMinKernelVersion         = 8
+var (
+	minKernelVer, _ = go_version.NewConstraint(">= 4.8.0")
+	minClangVer, _  = go_version.NewConstraint(">= 3.8.0")
 
-	majorMinClangVersion         = 3
-	minorRecommendedClangVersion = 9
-	minorMinClangVersion         = 8
+	recKernelVer, _ = go_version.NewConstraint(">= 4.9.0")
+	recClangVer, _  = go_version.NewConstraint(">= 3.9.0")
 )
 
 var (
 	config = NewConfig()
 
 	// Arguments variables keep in alphabetical order
+
+	// autoIPv6NodeRoutes automatically adds L3 direct routing when using direct mode (-d)
+	autoIPv6NodeRoutes    bool
 	bpfRoot               string
 	disableConntrack      bool
-	disableBPFTrace       bool
 	enableTracing         bool
 	enableLogstash        bool
-	k8sLabelsPrefixes     []string
 	kvStore               string
 	validLabels           []string
 	labelPrefixFile       string
@@ -86,6 +91,9 @@ var (
 	v4ClusterCidrMaskSize int
 	v4ServicePrefix       string
 	v6ServicePrefix       string
+	k8sAPIServer          string
+	k8sKubeConfigPath     string
+	dockerEndpoint        string
 )
 
 var logOpts = make(map[string]string)
@@ -104,90 +112,117 @@ var RootCmd = &cobra.Command{
 }
 
 func main() {
+
+	// Open socket for using gops to get stacktraces of the agent.
+	if err := gops.Listen(gops.Options{}); err != nil {
+		errorString := fmt.Sprintf("unable to start gops: %s", err)
+		fmt.Println(errorString)
+		os.Exit(-1)
+	}
+
 	if err := RootCmd.Execute(); err != nil {
 		fmt.Println(err)
 		os.Exit(-1)
 	}
 }
 
-func getMajorMinorVersion(version string) (int, int, error) {
-	versions := strings.Split(version, ".")
-	if len(versions) < 2 {
-		return 0, 0, fmt.Errorf("unable to get version from %q", version)
-	}
-	majorStr, minorStr := versions[0], versions[1]
-	major, err := strconv.Atoi(majorStr)
+func getKernelVersion() (*go_version.Version, error) {
+	verOut, err := exec.Command("uname", "-r").CombinedOutput()
 	if err != nil {
-		return 0, 0, fmt.Errorf("unable to get major version from %q", version)
+		log.WithError(err).Fatal("kernel version: NOT OK")
 	}
-	minor, err := strconv.Atoi(minorStr)
-	if err != nil {
-		return 0, 0, fmt.Errorf("unable to get minor version from %q", version)
+	verStrs := strings.Split(string(verOut), ".")
+	if len(verStrs) < 2 {
+		return nil, fmt.Errorf("unable to get kernel version from %q", string(verOut))
 	}
-	return major, minor, nil
+	return go_version.NewVersion(strings.Join(verStrs[:2], "."))
 }
 
-func checkKernelVersion() (int, int, error) {
-	kernelVersion, err := exec.Command("uname", "-r").CombinedOutput()
+func getClangVersion(filePath string) (*go_version.Version, error) {
+	verOut, err := exec.Command(filePath, "--version").CombinedOutput()
 	if err != nil {
-		return 0, 0, err
+		log.WithError(err).Fatal("clang version: NOT OK")
 	}
-	return getMajorMinorVersion(string(kernelVersion))
+	res := regexp.MustCompile(`(clang version )([^ ]*)`).FindStringSubmatch(string(verOut))
+	if len(res) != 3 {
+		log.Fatalf("clang version: NOT OK: unable to get clang's version "+
+			"from: %q", string(verOut))
+	}
+	// at this point res is []string{"clang", "version", "maj.min.patch"}
+	verStrs := strings.Split(res[2], ".")
+	if len(verStrs) < 2 {
+		return nil, fmt.Errorf("unable to get kernel version from %q", string(verOut))
+	}
+	return go_version.NewVersion(strings.Join(verStrs[:2], "."))
+}
+
+func checkBPFLogs(logType string, fatal bool) {
+	bpfLogFile := logType + ".log"
+	bpfLogPath := filepath.Join(config.StateDir, bpfLogFile)
+
+	if _, err := os.Stat(bpfLogPath); os.IsNotExist(err) {
+		log.Infof("%s check: OK!", logType)
+	} else if err == nil {
+		bpfFeaturesLog, err := ioutil.ReadFile(bpfLogPath)
+		if err != nil {
+			log.WithError(err).WithField(logfields.Path, bpfLogPath).Fatalf("%s check: NOT OK. Unable to read", logType)
+		}
+		printer := log.Debugf
+		if fatal {
+			printer = log.Errorf
+			printer("%s check: NOT OK", logType)
+		} else {
+			printer("%s check: Some features may be limited:", logType)
+		}
+		lines := strings.Trim(string(bpfFeaturesLog), "\n")
+		for _, line := range strings.Split(lines, "\n") {
+			printer(line)
+		}
+		if fatal {
+			log.Fatalf("%s check failed.", logType)
+		}
+	} else {
+		log.WithError(err).WithField(logfields.Path, bpfLogPath).Fatalf("%s check: NOT OK. Unable to read", logType)
+	}
 }
 
 func checkMinRequirements() {
-	kernelMajor, kernelMinor, err := checkKernelVersion()
+	kernelVersion, err := getKernelVersion()
 	if err != nil {
-		log.Fatalf("kernel version: NOT OK: %s", err)
+		log.WithError(err).Fatal("kernel version: NOT OK")
 	}
-	if kernelMajor < majorMinKernelVersion ||
-		(kernelMajor == majorMinKernelVersion && kernelMinor < minorMinKernelVersion) {
+	if !minKernelVer.Check(kernelVersion) {
 		log.Fatalf("kernel version: NOT OK: minimal supported kernel "+
-			"version is >= %d.%d; kernel version that is running is: %d.%d", majorMinKernelVersion, minorMinKernelVersion, kernelMajor, kernelMinor)
+			"version is %s; kernel version that is running is: %s", minKernelVer, kernelVersion)
 	}
 
 	if filePath, err := exec.LookPath("clang"); err != nil {
-		log.Fatalf("clang: NOT OK: %s", err)
+		log.WithError(err).Fatal("clang: NOT OK")
 	} else {
-		clangVersion, err := exec.Command(filePath, "--version").CombinedOutput()
+		clangVersion, err := getClangVersion(filePath)
 		if err != nil {
-			log.Fatalf("clang version: NOT OK: %s", err)
+			log.WithError(err).Fatal("clang: NOT OK")
 		}
-		res := regexp.MustCompile(`(clang version )([^ ]*)`).FindStringSubmatch(string(clangVersion))
-		if len(res) != 3 {
-			log.Fatalf("clang version: NOT OK: unable to get clang's version "+
-				"number from: %q", string(clangVersion))
-		}
-		clangMajor, clangMinor, err := getMajorMinorVersion(res[2])
-		if err != nil {
-			log.Fatalf("clang version: NOT OK: %s", err)
-		}
-		if clangMajor < majorMinClangVersion ||
-			(clangMajor == majorMinClangVersion && clangMinor < minorMinClangVersion) {
-			log.Fatalf("clang version: NOT OK: minimal supported clang version is "+
-				">= %d.%d", majorMinClangVersion, minorMinClangVersion)
+		if !minClangVer.Check(clangVersion) {
+			log.Fatalf("clang version: NOT OK: minimal supported clang "+
+				"version is %s; clang version that is running is: %s", minClangVer, clangVersion)
 		}
 		//clang >= 3.9 / kernel < 4.9 - does not work
-		if ((clangMajor == majorMinClangVersion && clangMinor > minorMinClangVersion) ||
-			clangMajor > majorMinClangVersion) &&
-			((kernelMajor < majorMinKernelVersion) ||
-				(kernelMajor == majorMinKernelVersion && kernelMinor < minorRecommendedKernelVersion)) {
-			log.Fatalf("clang (%d.%d) and kernel (%d.%d) version: NOT OK: please upgrade "+
-				"your kernel version to at least %d.%d",
-				clangMajor, clangMinor, kernelMajor, kernelMinor,
-				majorMinKernelVersion,
-				minorRecommendedKernelVersion)
+		if recClangVer.Check(clangVersion) && !recKernelVer.Check(kernelVersion) {
+			log.Fatalf("clang (%s) and kernel (%s) version: NOT OK: please upgrade "+
+				"your kernel version to at least %s",
+				clangVersion, kernelVersion, recKernelVer)
 		}
-		log.Infof("clang and kernel versions: OK!")
+		log.Infof("clang (%s) and kernel (%s) versions: OK!", clangVersion, kernelVersion)
 	}
 
 	if filePath, err := exec.LookPath("llc"); err != nil {
-		log.Fatalf("llc: NOT OK: %s", err)
+		log.WithError(err).Fatal("llc: NOT OK")
 	} else {
 		lccVersion, err := exec.Command(filePath, "--version").CombinedOutput()
 		if err == nil {
 			if strings.Contains(strings.ToLower(string(lccVersion)), "debug") {
-				log.Warningf("llc version was compiled in debug mode, expect higher latency!")
+				log.Warn("llc version was compiled in debug mode, expect higher latency!")
 			}
 		}
 		// /usr/include/gnu/stubs-32.h is installed by 'glibc-devel.i686' in fedora
@@ -203,34 +238,23 @@ func checkMinRequirements() {
 		log.Info("linking environment: OK!")
 	}
 
-	// Checking for bpf_features
 	globalsDir := filepath.Join(config.StateDir, "globals")
 	if err := os.MkdirAll(globalsDir, defaults.StateDirRights); err != nil {
-		log.Fatalf("Could not create runtime directory %q: %s", globalsDir, err)
+		log.WithError(err).WithField(logfields.Path, globalsDir).Fatal("Could not create runtime directory")
 	}
 	if err := os.Chdir(config.LibDir); err != nil {
-		log.Fatalf("Could not change to runtime directory %q: %s",
-			config.LibDir, err)
+		log.WithError(err).WithField(logfields.Path, config.LibDir).Fatal("Could not change to runtime directory")
 	}
 	probeScript := filepath.Join(config.BpfDir, "run_probes.sh")
 	if err := exec.Command(probeScript, config.BpfDir, config.StateDir).Run(); err != nil {
-		log.Fatalf("BPF Verifier: NOT OK. Unable to run checker for bpf_features: %s", err)
+		log.WithError(err).Fatal("BPF Verifier: NOT OK. Unable to run checker for bpf_features")
 	}
 	if _, err := os.Stat(filepath.Join(globalsDir, "bpf_features.h")); os.IsNotExist(err) {
-		log.Fatalf("BPF Verifier: NOT OK. Unable to read bpf_features.h: %s", err)
+		log.WithError(err).WithField(logfields.Path, globalsDir).Fatal("BPF Verifier: NOT OK. Unable to read bpf_features.h")
 	}
-	bpfLogPath := filepath.Join(config.StateDir, "bpf_features.log")
-	if _, err := os.Stat(bpfLogPath); os.IsNotExist(err) {
-		log.Infof("BPF Verifier: OK!")
-	} else if err == nil {
-		bpfFeaturesLog, err := ioutil.ReadFile(bpfLogPath)
-		if err != nil {
-			log.Fatalf("BPF Verifier: NOT OK. Unable to read %q: %s", bpfLogPath, err)
-		}
-		log.Infof("BPF Verifier: NOT OK:%s", string(bpfFeaturesLog))
-	} else {
-		log.Fatalf("BPF Verifier: NOT OK. Unable to read %q: %s", bpfLogPath, err)
-	}
+
+	checkBPFLogs("bpf_requirements", true)
+	checkBPFLogs("bpf_features", false)
 }
 
 func init() {
@@ -242,6 +266,8 @@ func init() {
 		"agent-labels", []string{}, "Additional labels to identify this agent")
 	flags.StringVar(&config.AllowLocalhost,
 		"allow-localhost", AllowLocalhostAuto, "Policy when to allow local stack to reach local endpoints { auto | always | policy } ")
+	flags.Bool(
+		"auto-ipv6-node-routes", false, "Automatically adds IPv6 L3 routes to reach other nodes for non-overlay mode (--device) (BETA)")
 	flags.StringVar(&bpfRoot,
 		"bpf-root", "", "Path to BPF filesystem")
 	flags.StringVar(&cfgFile,
@@ -252,16 +278,17 @@ func init() {
 		"debug", "D", false, "Enable debugging mode")
 	flags.StringVarP(&config.Device,
 		"device", "d", "undefined", "Device facing cluster/external network for direct L3 (non-overlay mode)")
+	flags.StringVarP(&config.DevicePreFilter,
+		"prefilter-device", "", "undefined", "Device facing external network for XDP prefiltering")
+	flags.StringVarP(&config.ModePreFilter,
+		"prefilter-mode", "", ModePreFilterNative, "Prefilter mode { "+ModePreFilterNative+" | "+ModePreFilterGeneric+" } (default: "+ModePreFilterNative+")")
 	flags.BoolVar(&disableConntrack,
 		"disable-conntrack", false, "Disable connection tracking")
 	flags.BoolVar(&config.IPv4Disabled,
 		"disable-ipv4", false, "Disable IPv4 mode")
-	flags.BoolVar(&disableBPFTrace,
-		"disable-trace", false, "Disable ability to trace datapath actions")
-	flags.StringVarP(&config.DockerEndpoint,
+	flags.StringVarP(&dockerEndpoint,
 		"docker", "e", "unix:///var/run/docker.sock", "Path to docker runtime socket")
-	flags.StringVar(&config.EnablePolicy,
-		"enable-policy", endpoint.DefaultEnforcement, "Enable policy enforcement")
+	flags.String("enable-policy", endpoint.DefaultEnforcement, "Enable policy enforcement")
 	flags.BoolVar(&enableTracing,
 		"enable-tracing", false, "Enable tracing while determining policy (debugging)")
 	flags.StringVar(&v4Prefix,
@@ -272,9 +299,9 @@ func init() {
 		"ipv4-service-range", AutoCIDR, "Kubernetes IPv4 services CIDR if not inside cluster prefix")
 	flags.StringVar(&v6ServicePrefix,
 		"ipv6-service-range", AutoCIDR, "Kubernetes IPv6 services CIDR if not inside cluster prefix")
-	flags.StringVar(&config.K8sEndpoint,
+	flags.StringVar(&k8sAPIServer,
 		"k8s-api-server", "", "Kubernetes api address server (for https use --k8s-kubeconfig-path instead)")
-	flags.StringVar(&config.K8sCfgPath,
+	flags.StringVar(&k8sKubeConfigPath,
 		"k8s-kubeconfig-path", "", "Absolute path of the kubernetes kubeconfig file")
 	flags.BoolVar(&config.KeepConfig,
 		"keep-config", false, "When restoring state, keeps containers' configuration in place")
@@ -322,6 +349,8 @@ func init() {
 		"trace-payloadlen", 128, "Length of payload to capture when tracing")
 	flags.Bool(
 		"version", false, "Print version information")
+	flags.Bool(
+		"pprof", false, "Enable serving the pprof debugging API")
 
 	viper.BindPFlags(flags)
 }
@@ -378,31 +407,42 @@ func initConfig() {
 	log.Info("|___|_|_|_|___|_|_|_|")
 	log.Infof("Cilium %s", version.Version)
 
+	if viper.GetBool("pprof") {
+		pprof.Enable()
+	}
+
 	if config.IPv4Disabled {
 		endpoint.IPv4Enabled = false
 		nodeaddress.EnableIPv4 = false
 	}
 
+	scopedLog := log.WithFields(log.Fields{
+		logfields.Path + ".RunDir": config.RunDir,
+		logfields.Path + ".LibDir": config.LibDir,
+	})
+
 	config.BpfDir = filepath.Join(config.LibDir, defaults.BpfDir)
+	scopedLog = scopedLog.WithField(logfields.Path+".BPFDir", defaults.BpfDir)
 	if err := os.MkdirAll(config.RunDir, defaults.RuntimePathRights); err != nil {
-		log.Fatalf("Could not create runtime directory %q: %s", config.RunDir, err)
+		scopedLog.WithError(err).Fatal("Could not create runtime directory")
 	}
 
 	config.StateDir = filepath.Join(config.RunDir, defaults.StateDir)
+	scopedLog = scopedLog.WithField(logfields.Path+".StateDir", config.StateDir)
 	if err := os.MkdirAll(config.StateDir, defaults.StateDirRights); err != nil {
-		log.Fatalf("Could not create state directory %q: %s", config.StateDir, err)
+		scopedLog.WithError(err).Fatal("Could not create state directory")
 	}
 
 	if err := os.MkdirAll(config.LibDir, defaults.RuntimePathRights); err != nil {
-		log.Fatalf("Could not create library directory %q: %s", config.LibDir, err)
+		scopedLog.WithError(err).Fatal("Could not create library directory")
 	}
 	if !config.KeepTemplates {
 		if err := RestoreAssets(config.LibDir, defaults.BpfDir); err != nil {
-			log.Fatalf("Unable to restore agent assets: %s", err)
+			scopedLog.WithError(err).Fatal("Unable to restore agent assets")
 		}
 		// Restore permissions of executable files
 		if err := RestoreExecPermissions(config.LibDir, `.*\.sh`); err != nil {
-			log.Fatalf("Unable to restore agent assets: %s", err)
+			scopedLog.WithError(err).Fatal("Unable to restore agent assets")
 		}
 	}
 	checkMinRequirements()
@@ -417,18 +457,30 @@ func initConfig() {
 		log.Fatalf("Invalid setting for --allow-localhost, must be { %s, %s, %s }",
 			AllowLocalhostAuto, AllowLocalhostAlways, AllowLocalhostPolicy)
 	}
+
+	config.ModePreFilter = strings.ToLower(config.ModePreFilter)
+	switch config.ModePreFilter {
+	case ModePreFilterNative:
+		config.ModePreFilter = "xdpdrv"
+	case ModePreFilterGeneric:
+		config.ModePreFilter = "xdpgeneric"
+	default:
+		log.Fatalf("Invalid setting for --prefilter-mode, must be { %s, %s }",
+			ModePreFilterNative, ModePreFilterGeneric)
+	}
 }
 
 func initEnv() {
 	common.SetupLogging(loggers, logOpts, "cilium-agent", viper.GetBool("debug"))
 
+	scopedLog := log.WithField(logfields.Path, socketPath)
 	socketDir := path.Dir(socketPath)
 	if err := os.MkdirAll(socketDir, defaults.RuntimePathRights); err != nil {
-		log.Fatalf("Cannot mkdir directory %q for cilium socket: %s", socketDir, err)
+		scopedLog.WithError(err).Fatal("Cannot mkdir directory for cilium socket")
 	}
 
 	if err := os.Remove(socketPath); !os.IsNotExist(err) && err != nil {
-		log.Fatalf("Cannot remove existing Cilium sock %q: %s", socketPath, err)
+		scopedLog.WithError(err).Fatal("Cannot remove existing Cilium sock")
 	}
 
 	// The standard operation is to mount the BPF filesystem to the
@@ -446,34 +498,28 @@ func initEnv() {
 		config.Opts.Set(endpoint.OptionDebug, true)
 	}
 
+	autoIPv6NodeRoutes = viper.GetBool("auto-ipv6-node-routes")
+
 	config.Opts.Set(endpoint.OptionDropNotify, true)
+	config.Opts.Set(endpoint.OptionTraceNotify, true)
 	config.Opts.Set(options.PolicyTracing, enableTracing)
 	config.Opts.Set(endpoint.OptionConntrack, !disableConntrack)
 	config.Opts.Set(endpoint.OptionConntrackAccounting, !disableConntrack)
 	config.Opts.Set(endpoint.OptionConntrackLocal, false)
 
-	config.EnablePolicyMU.Lock()
-	config.EnablePolicy = strings.ToLower(config.EnablePolicy)
-	config.EnablePolicyMU.Unlock()
+	policy.SetPolicyEnabled(strings.ToLower(viper.GetString("enable-policy")))
 
 	if err := kvstore.Setup(kvStore, kvStoreOpts); err != nil {
-		log.Fatalf("Unable to setup kvstore: %s", err)
+		log.WithError(err).Fatal("Unable to setup kvstore")
 	}
 
-	if p, err := labels.ParseLabelPrefixCfg(validLabels, labelPrefixFile); err != nil {
-		log.Fatalf("%s", err)
-	} else {
-		config.ValidLabelPrefixes = p
-	}
-
-	log.Infof("Valid label prefix configuration:")
-	for _, l := range config.ValidLabelPrefixes.LabelPrefixes {
-		log.Infof(" - %s", l)
+	if err := labels.ParseLabelPrefixCfg(validLabels, labelPrefixFile); err != nil {
+		log.WithError(err).Fatal("Unable to parse Label prefix configuration")
 	}
 
 	_, r, err := net.ParseCIDR(nat46prefix)
 	if err != nil {
-		log.Fatalf("Invalid NAT46 prefix %s: %s", nat46prefix, err)
+		log.WithError(err).WithField(logfields.V6Prefix, nat46prefix).Fatal("Invalid NAT46 prefix")
 	}
 
 	config.NAT46Prefix = r
@@ -486,10 +532,10 @@ func initEnv() {
 
 	if v6Address != "auto" {
 		if ip := net.ParseIP(v6Address); ip == nil {
-			log.Fatalf("Invalid IPv6 node address '%s'", v6Address)
+			log.WithField(logfields.IPAddr, v6Address).Fatal("Invalid IPv6 node address")
 		} else {
 			if !ip.IsGlobalUnicast() {
-				log.Fatalf("Invalid IPv6 node address '%s': not a global unicast address", ip)
+				log.WithField(logfields.IPAddr, ip).Fatal("Invalid IPv6 node address: not a global unicast address")
 			}
 
 			nodeaddress.SetIPv6(ip)
@@ -498,26 +544,24 @@ func initEnv() {
 
 	if v4Address != "auto" {
 		if ip := net.ParseIP(v4Address); ip == nil {
-			log.Fatalf("Invalid IPv4 node address '%s'", v4Address)
+			log.WithField(logfields.IPAddr, v4Address).Fatal("Invalid IPv4 node address")
 		} else {
 			nodeaddress.SetExternalIPv4(ip)
 		}
 	}
 
-	if config.IsK8sEnabled() && !strings.HasPrefix(config.K8sEndpoint, "http") {
-		config.K8sEndpoint = "http://" + config.K8sEndpoint
-	}
+	k8s.Configure(k8sAPIServer, k8sKubeConfigPath)
 }
 
 func runDaemon() {
 	d, err := NewDaemon(config)
 	if err != nil {
-		log.Fatalf("Error while creating daemon: %s", err)
+		log.WithError(err).Fatal("Error while creating daemon")
 		return
 	}
 
 	if err := d.PolicyInit(); err != nil {
-		log.Fatalf("Unable to initialize policy: %s", err)
+		log.WithError(err).Fatal("Unable to initialize policy")
 	}
 
 	endpointmanager.EnableConntrackGC(!d.conf.IPv4Disabled, true)
@@ -529,25 +573,19 @@ func runDaemon() {
 	d.nodeMonitor = &monitor.NodeMonitor{}
 	go d.nodeMonitor.Run()
 
-	sinceLastSync := time.Now()
-	d.SyncDocker()
-
-	// Register event listener in docker endpoint
-	if err := d.EnableDockerEventListener(sinceLastSync); err != nil {
-		log.Warningf("Error while enabling docker event watcher %s", err)
+	if err := containerd.EnableEventListener(); err != nil {
+		log.WithError(err).Fatal("Error while enabling containerd event watcher")
 	}
 
 	d.EnableKVStoreWatcher(30 * time.Second)
 
 	if err := d.EnableK8sWatcher(5 * time.Minute); err != nil {
-		log.Warningf("Error while enabling k8s watcher %s", err)
+		log.WithError(err).Warn("Error while enabling k8s watcher")
 	}
-
-	d.RunBackgroundContainerSync()
 
 	swaggerSpec, err := loads.Analyzed(server.SwaggerJSON, "")
 	if err != nil {
-		log.Fatal(err)
+		log.WithError(err).Fatal("Cannot load swagger spec")
 	}
 
 	api := restapi.NewCiliumAPI(swaggerSpec)
@@ -598,6 +636,11 @@ func runDaemon() {
 	// /service/
 	api.ServiceGetServiceHandler = NewGetServiceHandler(d)
 
+	// /prefilter/
+	api.PrefilterGetPrefilterHandler = NewGetPrefilterHandler(d)
+	api.PrefilterPutPrefilterHandler = NewPutPrefilterHandler(d)
+	api.PrefilterDeletePrefilterHandler = NewDeletePrefilterHandler(d)
+
 	// /ipam/{ip}/
 	api.IPAMPostIPAMHandler = NewPostIPAMHandler(d)
 	api.IPAMPostIPAMIPHandler = NewPostIPAMIPHandler(d)
@@ -611,6 +654,6 @@ func runDaemon() {
 	server.ConfigureAPI()
 
 	if err := server.Serve(); err != nil {
-		log.Fatal(err)
+		log.WithError(err).Fatal("Error returned from non-returning Serve() call")
 	}
 }

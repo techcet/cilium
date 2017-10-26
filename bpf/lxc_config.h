@@ -25,6 +25,7 @@
 #define LXC_IPV4 0x10203040
 #define LXC_ID 0x1010
 #define LXC_ID_NB 0x1010
+#define LXC_NAT46
 #ifndef SECLABEL
 #define SECLABEL 0xfffff
 #define SECLABEL_NB 0xfffff
@@ -33,6 +34,7 @@
 #define NODE_MAC { .addr = { 0xde, 0xad, 0xbe, 0xef, 0xc0, 0xde } }
 #define GENEVE_OPTS { 0xff, 0xff, 0x1, 0x1, 0x0, 0x0, 0x1, 0x1e }
 #define DROP_NOTIFY
+#define TRACE_NOTIFY
 #define CT_MAP6 cilium_ct6_111
 #define CT_MAP4 cilium_ct4_111
 #define CT_MAP_SIZE 4096
@@ -44,3 +46,8 @@
 #define CFG_L4_INGRESS 0, 80, 8080, 0, 1, 80, 8080, 0, (), 0
 #define NR_CFG_L4_EGRESS 1
 #define CFG_L4_EGRESS 0, 80, 8080, 0, (), 0
+#define POLICY_ENFORCEMENT
+#define ENABLE_IPv4
+#define ALLOW_TO_WORLD
+#define ALLOW_TO_HOST
+#define HAVE_L4_POLICY

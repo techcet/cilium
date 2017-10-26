@@ -19,9 +19,11 @@ import (
 	"strings"
 	"sync"
 
-	log "github.com/Sirupsen/logrus"
+	"github.com/cilium/cilium/pkg/lock"
+
 	etcdAPI "github.com/coreos/etcd/clientv3"
 	consulAPI "github.com/hashicorp/consul/api"
+	log "github.com/sirupsen/logrus"
 )
 
 // Supported key-value store types.
@@ -33,7 +35,8 @@ const (
 var (
 	// this variable is set via Makefile for test purposes and allows to tie a
 	// binary to a particular backend
-	backend = ""
+	backend       = ""
+	consulAddress = "127.0.0.1:8501"
 
 	consulConfig *consulAPI.Config // Consul configuration
 	etcdConfig   *etcdAPI.Config   // Etcd Configuration
@@ -56,23 +59,23 @@ func SetupDummy() {
 	switch backend {
 	case Consul:
 		consulConfig = consulAPI.DefaultConfig()
-		consulConfig.Address = "127.0.0.1:8501"
+		consulConfig.Address = consulAddress
 
 	case Etcd:
 		etcdConfig = &etcdAPI.Config{}
 		etcdConfig.Endpoints = []string{"http://127.0.0.1:4002"}
 
 	default:
-		log.Panicf("Unknown kvstore backend: %s", backend)
+		log.WithField("backend", backend).Panic("Unknown kvstore backend")
 	}
 
 	if err := initClient(); err != nil {
-		log.WithError(err).Panicf("Unable to initialize kvstore client")
+		log.WithError(err).Panic("Unable to initialize kvstore client")
 	}
 }
 
 var (
-	setupLock sync.Mutex
+	setupLock lock.Mutex
 	setupOnce sync.Once
 )
 
@@ -128,7 +131,7 @@ func Setup(selectedBackend string, opts map[string]string) error {
 			}
 
 		case "":
-			err = fmt.Errorf("kvstore not configured. Please specify --kvstore. See http://cilium.link/err-kvstore for details.")
+			err = fmt.Errorf("kvstore not configured. Please specify --kvstore. See http://cilium.link/err-kvstore for details")
 			return
 
 		default:
